@@ -1,0 +1,10 @@
+# Mock Testing Configuration
+
+mock:
+  default_capital: 1000000.0
+  slippage_pct: 0.05
+  brokerage_per_order: 20.0
+  speed_multiplier: 1.0
+  auto_fill_market_orders: true
+  realistic_fills: true
+  market_hours_only: true

@@ -1,0 +1,29 @@
+# Core dependencies
+fastapi==0.135.1
+uvicorn[standard]==0.34.3
+pydantic==2.12.5
+
+# Database
+sqlalchemy[asyncio]==2.0.41
+asyncpg==0.30.0
+alembic==1.16.2
+
+# Redis
+redis==6.2.0
+aioredis==2.0.1
+
+# Zerodha Kite Connect
+kiteconnect==5.0.1
+
+# HTTP client
+httpx==0.28.1
+
+# Config
+pyyaml==6.0.2
+
+# Utilities
+python-dotenv==1.1.1
+python-multipart==0.0.20
+
+# WebSocket
+websockets==15.0.1

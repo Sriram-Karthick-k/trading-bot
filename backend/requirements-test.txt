@@ -1,0 +1,9 @@
+# Testing dependencies (install with: pip install -r requirements-test.txt)
+-r requirements.txt
+
+pytest==8.4.1
+pytest-asyncio==1.0.0
+pytest-cov==6.2.1
+pytest-mock==3.14.0
+httpx==0.28.1
+factory-boy==3.3.3

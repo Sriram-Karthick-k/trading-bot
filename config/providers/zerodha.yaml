@@ -1,0 +1,11 @@
+# Zerodha Provider Configuration
+
+zerodha:
+  api_key: "zffqkhhm2o67fcrg"        # Set via TRADE_ZERODHA_API_KEY env var
+  api_secret: "oqvctymtpu1elqfenpk5dym7djt95gr7"     # Set via TRADE_ZERODHA_API_SECRET env var
+  base_url: "https://api.kite.trade"
+  ws_url: "wss://ws.kite.trade"
+  login_url: "https://kite.zerodha.com/connect/login"
+  timeout: 30
+  max_retries: 3
+  rate_limit_per_second: 10

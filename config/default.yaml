@@ -1,0 +1,25 @@
+# Zerodha Trade Platform – Default Configuration
+# Override via environment (TRADE_ prefix) or DB/UI settings
+
+app:
+  name: "Zerodha Trade Platform"
+  version: "0.1.0"
+  debug: false
+  log_level: "INFO"
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+
+database:
+  url: "postgresql+asyncpg://trade:trade@localhost:5432/zerodha_trade"
+  pool_size: 10
+  max_overflow: 20
+
+redis:
+  url: "redis://localhost:6379/0"
+
+provider:
+  default: "mock"
+  auto_discover: true

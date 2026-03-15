@@ -1,0 +1,51 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Docker
+postgres_data/
+redis_data/
+
+# Testing
+htmlcov/
+.coverage
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local dev SSL certificates (private keys must not be committed)
+certs/*.pem
+certs/*.key
+
+# Dev server PID files (created by make dev)
+.pid.backend
+.pid.frontend
+
+# Build
+dist/
+build/
+*.egg-info/

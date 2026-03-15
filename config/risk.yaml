@@ -1,0 +1,22 @@
+# Risk Management Configuration
+
+risk:
+  max_order_value: 500000.0
+  max_position_value: 1000000.0
+  max_loss_per_trade: 10000.0
+  max_daily_loss: 50000.0
+  max_open_orders: 20
+  max_open_positions: 10
+  max_quantity_per_order: 5000
+  max_orders_per_minute: 30
+  allowed_exchanges:
+    - NSE
+    - BSE
+    - NFO
+    - MCX
+    - CDS
+    - BFO
+  trading_hours:
+    start: "09:15"
+    end: "15:30"
+  kill_switch: false

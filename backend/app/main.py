@@ -1,0 +1,92 @@
+"""
+FastAPI application entry point.
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# Load .env from project root (parent of backend/)
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+else:
+    # Fallback: try .env in current working directory
+    load_dotenv()
+
+from app.api.routes import auth, orders, portfolio, market, strategies, mock, providers, config, postback, backtest
+from app.providers.registry import discover_providers
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting Zerodha Trade Platform...")
+    discover_providers()
+    logger.info("Providers discovered")
+
+    # Auto-load sample data for mock provider so instruments are available
+    try:
+        from app.providers.registry import get_active_provider_name, get_active_provider
+        if get_active_provider_name() == "mock":
+            from app.providers.mock.provider import MockProvider
+            provider = get_active_provider()
+            if isinstance(provider, MockProvider):
+                provider.engine.load_sample_data()
+                provider.load_instruments(provider.engine.get_sample_as_instruments())
+                logger.info("Mock provider: loaded %d sample instruments", len(provider._instruments))
+    except Exception as e:
+        logger.warning("Failed to auto-load mock sample data: %s", e)
+
+    yield
+    # Shutdown
+    logger.info("Shutting down...")
+
+
+app = FastAPI(
+    title="Zerodha Trade Platform",
+    description="Multi-provider automated trading platform with mock testing",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# CORS for frontend (HTTP and HTTPS local dev)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register routes
+app.include_router(auth.router, prefix="/api")
+app.include_router(orders.router, prefix="/api")
+app.include_router(portfolio.router, prefix="/api")
+app.include_router(market.router, prefix="/api")
+app.include_router(strategies.router, prefix="/api")
+app.include_router(mock.router, prefix="/api")
+app.include_router(providers.router, prefix="/api")
+app.include_router(config.router, prefix="/api")
+app.include_router(postback.router, prefix="/api")
+app.include_router(backtest.router, prefix="/api")
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "version": "0.1.0"}
