@@ -13,7 +13,7 @@ from typing import Any
 
 from app.core.risk_manager import RiskManager
 from app.providers.base import BrokerProvider, OrderError
-from app.providers.types import Order, OrderRequest, OrderStatus
+from app.providers.types import Order, OrderRequest, OrderResponse, OrderStatus
 from app.strategies.base import Strategy, StrategySignal
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,12 @@ class OrderManager:
         # Get current price for risk check
         try:
             ltp_data = await self._provider.get_ltp([signal.trading_symbol])
-            price = ltp_data.get(signal.trading_symbol, 0.0)
+            ltp_value = ltp_data.get(signal.trading_symbol)
+            if ltp_value is not None:
+                # get_ltp may return LTPQuote objects or raw floats
+                price = float(ltp_value.last_price if hasattr(ltp_value, "last_price") else ltp_value)
+            else:
+                price = 0.0
             if request.price and request.price > 0:
                 price = request.price
         except Exception:
@@ -82,7 +87,7 @@ class OrderManager:
         # Risk check
         open_orders = sum(
             1 for o in self._orders.values()
-            if o.status in (OrderStatus.PENDING, OrderStatus.OPEN)
+            if o.status in (OrderStatus.PUT_ORDER_REQ_RECEIVED, OrderStatus.OPEN)
         )
         open_positions = len(set(
             o.signal.instrument_token for o in self._orders.values()
@@ -108,7 +113,9 @@ class OrderManager:
 
         # Place order
         try:
-            order_id = await self._provider.place_order(request)
+            response = await self._provider.place_order(request)
+            # place_order returns OrderResponse — extract the order_id string
+            order_id = response.order_id if isinstance(response, OrderResponse) else str(response)
             self._risk.record_order_placed()
 
             managed = ManagedOrder(
@@ -116,7 +123,7 @@ class OrderManager:
                 strategy_id=strategy_id,
                 signal=signal,
                 request=request,
-                status=OrderStatus.PENDING,
+                status=OrderStatus.PUT_ORDER_REQ_RECEIVED,
             )
             self._orders[order_id] = managed
             self._strategy_orders.setdefault(strategy_id, []).append(order_id)
@@ -182,7 +189,7 @@ class OrderManager:
         cancelled = 0
         for oid in order_ids:
             managed = self._orders.get(oid)
-            if managed and managed.status in (OrderStatus.PENDING, OrderStatus.OPEN):
+            if managed and managed.status in (OrderStatus.PUT_ORDER_REQ_RECEIVED, OrderStatus.OPEN):
                 if await self.cancel_order(oid):
                     cancelled += 1
         return cancelled
@@ -197,7 +204,7 @@ class OrderManager:
     def get_open_orders(self) -> list[ManagedOrder]:
         return [
             o for o in self._orders.values()
-            if o.status in (OrderStatus.PENDING, OrderStatus.OPEN)
+            if o.status in (OrderStatus.PUT_ORDER_REQ_RECEIVED, OrderStatus.OPEN)
         ]
 
     def get_all_orders(self) -> list[ManagedOrder]:

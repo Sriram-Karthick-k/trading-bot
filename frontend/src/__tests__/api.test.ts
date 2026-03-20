@@ -6,7 +6,7 @@
 const mockFetch = jest.fn();
 global.fetch = mockFetch;
 
-import { health, orders, portfolio, auth, config, mock, strategies, providers, market } from "@/lib/api";
+import { health, orders, portfolio, auth, config, mock, strategies, providers, market, engine } from "@/lib/api";
 
 beforeEach(() => {
   mockFetch.mockReset();
@@ -247,5 +247,159 @@ describe("error handling", () => {
       text: () => Promise.resolve("Not found"),
     });
     await expect(health.check()).rejects.toThrow("Not found");
+  });
+});
+
+describe("engine", () => {
+  it("getStatus calls GET /engine/status", async () => {
+    mockResponse({
+      state: "idle",
+      picks_count: 0,
+      strategies_count: 0,
+      ticker_connected: false,
+      started_at: null,
+      stopped_at: null,
+      metrics: { total_signals: 0, total_orders: 0, total_fills: 0, session_pnl: 0 },
+      strategies: {},
+      recent_events: [],
+    });
+    const r = await engine.getStatus();
+    expect(r.state).toBe("idle");
+    expect(r.picks_count).toBe(0);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/status",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("loadPicks sends POST with picks array", async () => {
+    mockResponse({ status: "loaded", picks_count: 2, symbols: ["RELIANCE", "TCS"] });
+    const picks = [
+      {
+        trading_symbol: "RELIANCE",
+        instrument_token: 256265,
+        exchange: "NSE",
+        direction: "LONG",
+        today_open: 2500,
+        prev_close: 2480,
+        quantity: 1,
+        cpr: { pivot: 2490, tc: 2495, bc: 2485, width: 10, width_pct: 0.4 },
+      },
+      {
+        trading_symbol: "TCS",
+        instrument_token: 2953217,
+        cpr: { pivot: 3500, tc: 3510, bc: 3490, width: 20, width_pct: 0.57 },
+      },
+    ];
+    const r = await engine.loadPicks(picks);
+    expect(r.picks_count).toBe(2);
+    expect(r.symbols).toEqual(["RELIANCE", "TCS"]);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/load-picks",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("start sends POST /engine/start", async () => {
+    mockResponse({ status: "started", state: "running", strategies: 3 });
+    const r = await engine.start();
+    expect(r.status).toBe("started");
+    expect(r.strategies).toBe(3);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/start",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("stop sends POST /engine/stop", async () => {
+    mockResponse({ status: "stopped", state: "stopped" });
+    const r = await engine.stop();
+    expect(r.status).toBe("stopped");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/stop",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("pause sends POST /engine/pause", async () => {
+    mockResponse({ status: "paused", state: "paused" });
+    const r = await engine.pause();
+    expect(r.status).toBe("paused");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/pause",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("resume sends POST /engine/resume", async () => {
+    mockResponse({ status: "resumed", state: "running" });
+    const r = await engine.resume();
+    expect(r.status).toBe("resumed");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/resume",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("getPicks calls GET /engine/picks", async () => {
+    mockResponse([
+      {
+        trading_symbol: "RELIANCE",
+        instrument_token: 256265,
+        exchange: "NSE",
+        direction: "LONG",
+        quantity: 1,
+        today_open: 2500,
+        prev_close: 2480,
+        cpr: { pivot: 2490, tc: 2495, bc: 2485, width: 10, width_pct: 0.4 },
+      },
+    ]);
+    const r = await engine.getPicks();
+    expect(r).toHaveLength(1);
+    expect(r[0].trading_symbol).toBe("RELIANCE");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/picks",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("getEvents calls GET /engine/events with limit", async () => {
+    mockResponse([
+      { timestamp: "2025-01-01T09:15:00", type: "info", message: "Engine started", data: {} },
+    ]);
+    const r = await engine.getEvents(10);
+    expect(r).toHaveLength(1);
+    expect(r[0].type).toBe("info");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/events?limit=10",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("getEvents calls GET /engine/events without limit", async () => {
+    mockResponse([]);
+    await engine.getEvents();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/events",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("feedCandle sends POST /engine/feed-candle", async () => {
+    mockResponse({ status: "fed", instrument_token: 256265 });
+    const r = await engine.feedCandle({
+      instrument_token: 256265,
+      timestamp: "2025-01-01T09:20:00",
+      open: 2500,
+      high: 2510,
+      low: 2495,
+      close: 2508,
+      volume: 1000,
+    });
+    expect(r.status).toBe("fed");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/engine/feed-candle",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

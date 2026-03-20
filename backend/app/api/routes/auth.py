@@ -11,6 +11,7 @@ Zerodha Kite Connect login flow:
 
 from __future__ import annotations
 
+import logging
 import os
 
 from pydantic import BaseModel
@@ -19,6 +20,8 @@ from fastapi.responses import RedirectResponse
 
 from app.api.deps import ProviderDep, ConfigDep
 from app.providers.types import Credentials
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -99,6 +102,18 @@ async def handle_redirect(
             credentials=credentials,
             request_token=request_token,
         )
+        # Persist session to database for restart recovery
+        try:
+            from app.services.session_store import save_session
+            await save_session(
+                provider="zerodha",
+                access_token=session.access_token,
+                user_id=session.user_id,
+                meta={"user_name": session.user_name, "email": session.email},
+            )
+        except Exception as persist_err:
+            logger.warning("Failed to persist session to DB: %s", persist_err)
+
         # Redirect to frontend with success indicator
         return RedirectResponse(
             url=f"{FRONTEND_URL}?auth=success&user={session.user_id}"
@@ -125,6 +140,19 @@ async def handle_callback(body: CallbackRequest, provider: ProviderDep):
             credentials=credentials,
             request_token=body.request_token,
         )
+        # Persist session to database for restart recovery
+        try:
+            from app.services.session_store import save_session
+            provider_name = provider.get_provider_info().name
+            await save_session(
+                provider=provider_name,
+                access_token=session.access_token,
+                user_id=session.user_id,
+                meta={"user_name": session.user_name, "email": session.email},
+            )
+        except Exception as persist_err:
+            logger.warning("Failed to persist session to DB: %s", persist_err)
+
         return SessionResponse(
             user_id=session.user_id,
             user_name=session.user_name,
@@ -141,6 +169,23 @@ async def get_session(provider: ProviderDep):
     """Check if the current session is authenticated."""
     try:
         health = await provider.health_check()
-        return {"authenticated": health.healthy, "latency_ms": health.latency_ms}
+        result = {"authenticated": health.healthy, "latency_ms": health.latency_ms}
+
+        # Include session metadata if available
+        if health.healthy:
+            try:
+                from app.services.session_store import load_active_session
+                provider_name = provider.get_provider_info().name
+                saved = await load_active_session(provider_name)
+                if saved:
+                    result["user_id"] = saved.get("user_id")
+                    result["expires_at"] = (
+                        saved["expires_at"].isoformat()
+                        if saved.get("expires_at") else None
+                    )
+            except Exception:
+                pass  # DB may not be available; session endpoint still works
+
+        return result
     except Exception:
         return {"authenticated": False, "latency_ms": None}

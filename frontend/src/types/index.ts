@@ -185,3 +185,82 @@ export interface Margins {
     available_margin: number;
   };
 }
+
+// ── Engine Types ────────────────────────────────────────────
+
+export type EngineState =
+  | "idle"
+  | "loading"
+  | "running"
+  | "paused"
+  | "stopping"
+  | "stopped"
+  | "error";
+
+export interface EngineCPR {
+  pivot: number;
+  tc: number;
+  bc: number;
+  width_pct: number;
+}
+
+export interface EngineStrategyMetrics {
+  total_signals: number;
+  total_trades: number;
+  total_pnl: number;
+}
+
+export interface EngineStrategyDetail {
+  strategy_id: string;
+  symbol: string;
+  state: string;
+  direction: string;
+  cpr: EngineCPR | null;
+  metrics: EngineStrategyMetrics;
+  position: string | null;
+  entry_price: number;
+  stop_loss: number;
+  target: number;
+  traded_today: boolean;
+}
+
+export interface EngineEvent {
+  timestamp: string;
+  type: string;
+  message: string;
+  data: Record<string, unknown>;
+}
+
+export interface EngineStatus {
+  state: EngineState;
+  picks_count: number;
+  strategies_count: number;
+  ticker_connected: boolean;
+  started_at: string | null;
+  stopped_at: string | null;
+  metrics: {
+    total_signals: number;
+    total_orders: number;
+    total_fills: number;
+    session_pnl: number;
+  };
+  strategies: Record<string, EngineStrategyDetail>;
+  recent_events: EngineEvent[];
+}
+
+export interface EnginePick {
+  trading_symbol: string;
+  instrument_token: number;
+  exchange: string;
+  direction: string;
+  quantity: number;
+  today_open: number;
+  prev_close: number;
+  cpr: {
+    pivot: number;
+    tc: number;
+    bc: number;
+    width: number;
+    width_pct: number;
+  };
+}

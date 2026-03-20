@@ -26,7 +26,7 @@ export function useTickStream({ clientId, tokens, onTick, enabled = true }: UseT
     if (!enabled) return;
 
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "wss://localhost:8000";
-    const ws = new WebSocket(`${wsUrl}/ws/ticks/${clientId}`);
+    const ws = new WebSocket(`${wsUrl}/api/ws/ticks/${clientId}`);
 
     ws.onopen = () => {
       setConnected(true);

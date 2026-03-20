@@ -20,8 +20,9 @@ else:
     # Fallback: try .env in current working directory
     load_dotenv()
 
-from app.api.routes import auth, orders, portfolio, market, strategies, mock, providers, config, postback, backtest
+from app.api.routes import auth, orders, portfolio, market, strategies, mock, providers, config, postback, backtest, engine, ws
 from app.providers.registry import discover_providers
+from app.db.database import init_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,8 +35,37 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Zerodha Trade Platform...")
+
+    # Initialize database tables
+    try:
+        await init_db()
+        logger.info("Database tables initialized")
+    except Exception as e:
+        logger.warning("Database init skipped (DB may not be available): %s", e)
+
     discover_providers()
     logger.info("Providers discovered")
+
+    # Restore saved session for Zerodha provider
+    try:
+        from app.providers.registry import get_active_provider_name, get_active_provider
+        from app.services.session_store import load_active_session
+
+        if get_active_provider_name() == "zerodha":
+            saved = await load_active_session("zerodha")
+            if saved and saved.get("access_token"):
+                from app.providers.zerodha.provider import ZerodhaProvider
+                provider = get_active_provider()
+                if isinstance(provider, ZerodhaProvider):
+                    provider._access_token = saved["access_token"]
+                    if provider._kite is not None:
+                        provider._kite.set_access_token(saved["access_token"])
+                    logger.info(
+                        "Restored Zerodha session for user=%s (expires %s)",
+                        saved.get("user_id"), saved.get("expires_at"),
+                    )
+    except Exception as e:
+        logger.warning("Failed to restore saved session: %s", e)
 
     # Auto-load sample data for mock provider so instruments are available
     try:
@@ -53,6 +83,11 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     logger.info("Shutting down...")
+    try:
+        from app.services.redis_client import close_redis
+        await close_redis()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -85,6 +120,8 @@ app.include_router(providers.router, prefix="/api")
 app.include_router(config.router, prefix="/api")
 app.include_router(postback.router, prefix="/api")
 app.include_router(backtest.router, prefix="/api")
+app.include_router(engine.router, prefix="/api")
+app.include_router(ws.router, prefix="/api")
 
 
 @app.get("/api/health")

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { SWRProvider } from "@/lib/swr-provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -21,10 +22,12 @@ export default function RootLayout({
         />
       </head>
       <body className="min-h-screen antialiased" style={{ fontFamily: "'Outfit', sans-serif" }}>
-        <div className="flex min-h-screen">
-          <Sidebar />
-          <main className="flex-1 overflow-auto">{children}</main>
-        </div>
+        <SWRProvider>
+          <div className="flex min-h-screen">
+            <Sidebar />
+            <main className="flex-1 overflow-auto">{children}</main>
+          </div>
+        </SWRProvider>
       </body>
     </html>
   );
@@ -38,6 +41,7 @@ function Sidebar() {
     { href: "/portfolio", label: "Portfolio", icon: "◎" },
     { href: "/strategies", label: "Strategies", icon: "⬡" },
     { href: "/backtest", label: "Backtest", icon: "⟳" },
+    { href: "/cpr-scanner", label: "CPR Scanner", icon: "⊡" },
     { href: "/mock", label: "Mock Testing", icon: "⏣" },
     { href: "/providers", label: "Providers", icon: "⊞" },
     { href: "/settings", label: "Settings", icon: "⚙" },

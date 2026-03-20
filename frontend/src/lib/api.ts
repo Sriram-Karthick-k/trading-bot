@@ -203,6 +203,58 @@ export const mock = {
     request<{ net: import("@/types").Position[] }>("/mock/positions"),
 };
 
+// ── Engine ──────────────────────────────────────────────
+
+export const engine = {
+  getStatus: () => request<import("@/types").EngineStatus>("/engine/status"),
+  loadPicks: (picks: {
+    trading_symbol: string;
+    instrument_token: number;
+    exchange?: string;
+    direction?: string;
+    today_open?: number;
+    prev_close?: number;
+    quantity?: number;
+    cpr: { pivot: number; tc: number; bc: number; width: number; width_pct: number };
+  }[]) =>
+    request<{ status: string; picks_count: number; symbols: string[] }>("/engine/load-picks", {
+      method: "POST",
+      body: JSON.stringify({ picks }),
+    }),
+  start: () =>
+    request<{ status: string; state: string; strategies: number }>("/engine/start", {
+      method: "POST",
+    }),
+  stop: () =>
+    request<{ status: string; state: string }>("/engine/stop", {
+      method: "POST",
+    }),
+  pause: () =>
+    request<{ status: string; state: string }>("/engine/pause", {
+      method: "POST",
+    }),
+  resume: () =>
+    request<{ status: string; state: string }>("/engine/resume", {
+      method: "POST",
+    }),
+  getPicks: () => request<import("@/types").EnginePick[]>("/engine/picks"),
+  getEvents: (limit?: number) =>
+    request<import("@/types").EngineEvent[]>(`/engine/events${limit ? `?limit=${limit}` : ""}`),
+  feedCandle: (candle: {
+    instrument_token: number;
+    timestamp: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume?: number;
+  }) =>
+    request<{ status: string; instrument_token: number }>("/engine/feed-candle", {
+      method: "POST",
+      body: JSON.stringify(candle),
+    }),
+};
+
 // ── Health ──────────────────────────────────────────────
 
 export const health = {
@@ -255,10 +307,77 @@ export interface BacktestResult {
   equity_curve: { timestamp: string; equity: number; drawdown: number }[];
 }
 
+export interface CPRScanParams {
+  scan_date: string;
+  indices?: string[];
+  narrow_threshold?: number;
+}
+
+export interface CPRData {
+  pivot: number;
+  tc: number;
+  bc: number;
+  width: number;
+  width_pct: number;
+  is_narrow: boolean;
+}
+
+export interface PrevDayData {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface CPRScanError {
+  symbol: string;
+  error: string;
+}
+
+export interface CPRStockEntry {
+  symbol: string;
+  name: string;
+  instrument_token: number;
+  indices: string[];
+  scan_date: string;
+  prev_day: PrevDayData;
+  cpr: CPRData;
+  today_open: number;
+  data_source: string;
+}
+
+export interface CPRScanResult {
+  scan_date: string;
+  scan_params: {
+    narrow_threshold: number;
+    indices_selected: string[];
+    unique_stocks: number;
+  };
+  summary: {
+    total_stocks_scanned: number;
+    narrow_count: number;
+  };
+  stocks: CPRStockEntry[];
+  errors: CPRScanError[] | null;
+}
+
+export interface CPRIndexInfo {
+  name: string;
+  constituent_count: number;
+}
+
 export const backtest = {
   run: (params: BacktestParams) =>
     request<BacktestResult>("/backtest/run", {
       method: "POST",
       body: JSON.stringify(params),
     }),
+  cprScan: (params: CPRScanParams) =>
+    request<CPRScanResult>("/backtest/cpr-scan", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+  cprIndices: () =>
+    request<{ indices: CPRIndexInfo[] }>("/backtest/cpr-scan/indices"),
 };

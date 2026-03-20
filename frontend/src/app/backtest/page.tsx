@@ -41,7 +41,7 @@ export default function BacktestPage() {
   const [interval, setInterval] = useState("day");
   const [fromDate, setFromDate] = useState(() => {
     const d = new Date();
-    d.setFullYear(d.getFullYear() - 1);
+    d.setMonth(d.getMonth() - 1);
     return d.toISOString().split("T")[0];
   });
   const [toDate, setToDate] = useState(
@@ -63,7 +63,7 @@ export default function BacktestPage() {
         setStrategies(data);
         if (data.length > 0) setSelectedStrategy(data[0].name);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   // Update params when strategy changes
@@ -392,13 +392,12 @@ function BacktestResults({ result }: { result: BacktestResult }) {
     <div className="space-y-4">
       {/* Data source banner */}
       <div
-        className={`rounded-lg px-4 py-2 text-sm flex items-center gap-2 ${
-          result.data_source === "zerodha"
+        className={`rounded-lg px-4 py-2 text-sm flex items-center gap-2 ${result.data_source === "zerodha"
             ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
             : result.data_source === "mock_synthetic"
               ? "bg-amber-500/10 text-amber-400 border border-amber-500/20"
               : "bg-red-500/10 text-red-400 border border-red-500/20"
-        }`}
+          }`}
       >
         {result.data_source === "zerodha" ? (
           <>
@@ -454,11 +453,10 @@ function BacktestResults({ result }: { result: BacktestResult }) {
           {(["summary", "trades", "equity"] as const).map((t) => (
             <button
               key={t}
-              className={`px-4 py-1.5 text-sm rounded-t-lg transition-colors ${
-                tab === t
+              className={`px-4 py-1.5 text-sm rounded-t-lg transition-colors ${tab === t
                   ? "text-white bg-white/10"
                   : "text-[var(--muted)] hover:text-white"
-              }`}
+                }`}
               onClick={() => setTab(t)}
             >
               {t === "summary"
@@ -591,11 +589,10 @@ function TradesTab({ result }: { result: BacktestResult }) {
               </td>
               <td className="py-2 pr-4">
                 <span
-                  className={`px-2 py-0.5 rounded text-xs font-medium ${
-                    t.action === "BUY"
+                  className={`px-2 py-0.5 rounded text-xs font-medium ${t.action === "BUY"
                       ? "bg-emerald-500/10 text-emerald-400"
                       : "bg-red-500/10 text-red-400"
-                  }`}
+                    }`}
                 >
                   {t.action}
                 </span>
@@ -613,14 +610,56 @@ function TradesTab({ result }: { result: BacktestResult }) {
               >
                 ₹{t.price.toFixed(2)}
               </td>
-              <td className="py-2 text-xs text-[var(--muted)] max-w-[300px] truncate">
-                {t.reason}
+              <td className="py-2 text-xs text-[var(--muted)] max-w-[400px]">
+                <TradeReason reason={t.reason} />
               </td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+/* ═══════ Trade Reason ═══════ */
+function TradeReason({ reason }: { reason: string }) {
+  // Parse CPR breakout reasons: "CPR breakout LONG — close X > TC Y (width Z%)"
+  const cprMatch = reason.match(
+    /CPR breakout (LONG|SHORT) — close ([\d.]+) ([<>]) (?:TC|BC) ([\d.]+) \(width ([\d.]+)%\)/
+  );
+
+  if (!cprMatch) {
+    return <span>{reason}</span>;
+  }
+
+  const [, direction, close, , level, width] = cprMatch;
+  const isLong = direction === "LONG";
+
+  return (
+    <span className="flex items-center gap-2 flex-wrap">
+      <span
+        className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+          isLong
+            ? "bg-emerald-500/10 text-emerald-400"
+            : "bg-red-500/10 text-red-400"
+        }`}
+      >
+        CPR {direction}
+      </span>
+      <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+        {isLong ? "TC" : "BC"}: {level}
+      </span>
+      <span className="text-[var(--muted)]">@</span>
+      <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+        {close}
+      </span>
+      <span
+        className="text-[10px] text-blue-400"
+        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      >
+        w:{width}%
+      </span>
+    </span>
   );
 }
 
