@@ -20,7 +20,7 @@ else:
     # Fallback: try .env in current working directory
     load_dotenv()
 
-from app.api.routes import auth, orders, portfolio, market, strategies, mock, providers, config, postback, backtest, engine, ws
+from app.api.routes import auth, orders, portfolio, market, strategies, mock, providers, config, postback, backtest, engine, ws, journal
 from app.providers.registry import discover_providers
 from app.db.database import init_db
 
@@ -45,6 +45,19 @@ async def lifespan(app: FastAPI):
 
     discover_providers()
     logger.info("Providers discovered")
+
+    # Restore trading mode from config/DB
+    try:
+        from app.api.deps import get_config_manager, set_trading_mode
+        config_mgr = get_config_manager()
+        saved_mode = config_mgr.get("trading.mode", str, default="live")
+        if saved_mode == "paper":
+            set_trading_mode("paper")
+            logger.info("Restored trading mode: paper")
+        else:
+            logger.info("Trading mode: live")
+    except Exception as e:
+        logger.warning("Failed to restore trading mode: %s", e)
 
     # Restore saved session for Zerodha provider
     try:
@@ -122,6 +135,7 @@ app.include_router(postback.router, prefix="/api")
 app.include_router(backtest.router, prefix="/api")
 app.include_router(engine.router, prefix="/api")
 app.include_router(ws.router, prefix="/api")
+app.include_router(journal.router, prefix="/api")
 
 
 @app.get("/api/health")

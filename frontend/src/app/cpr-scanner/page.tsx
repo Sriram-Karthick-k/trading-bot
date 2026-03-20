@@ -7,6 +7,7 @@ import {
   type CPRScanResult,
   type CPRStockEntry,
   type CPRIndexInfo,
+  type RefreshIndicesResult,
 } from "@/lib/api";
 import { formatNumber } from "@/lib/utils";
 
@@ -28,9 +29,12 @@ export default function CPRScannerPage() {
   const [availableIndices, setAvailableIndices] = useState<CPRIndexInfo[]>([]);
   const [selectedIndices, setSelectedIndices] = useState<Set<string>>(new Set());
   const [indicesLoading, setIndicesLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshResult, setRefreshResult] = useState<string | null>(null);
 
   // Load available indices on mount
-  useEffect(() => {
+  const loadIndices = useCallback(() => {
+    setIndicesLoading(true);
     backtest
       .cprIndices()
       .then((data) => {
@@ -52,6 +56,32 @@ export default function CPRScannerPage() {
       })
       .finally(() => setIndicesLoading(false));
   }, []);
+
+  useEffect(() => {
+    loadIndices();
+  }, [loadIndices]);
+
+  const handleRefreshIndices = async () => {
+    setRefreshing(true);
+    setRefreshResult(null);
+    try {
+      const result: RefreshIndicesResult = await backtest.refreshIndices();
+      setRefreshResult(
+        `Refreshed ${result.indices_fetched} indices` +
+        (result.indices_failed > 0 ? ` (${result.indices_failed} failed)` : "")
+      );
+      // Reload the index list with fresh data
+      loadIndices();
+    } catch (e: unknown) {
+      setRefreshResult(
+        `Refresh failed: ${e instanceof Error ? e.message : "Unknown error"}`
+      );
+    } finally {
+      setRefreshing(false);
+      // Auto-clear the result message after 5 seconds
+      setTimeout(() => setRefreshResult(null), 5000);
+    }
+  };
 
   const toggleIndex = useCallback((name: string) => {
     setSelectedIndices((prev) => {
@@ -167,7 +197,7 @@ export default function CPRScannerPage() {
             <h4 className="text-xs text-[var(--muted)] uppercase tracking-wider">
               Select Indices
             </h4>
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
               <button
                 className="text-[10px] text-blue-400 hover:text-blue-300 transition-colors"
                 onClick={selectAll}
@@ -181,8 +211,35 @@ export default function CPRScannerPage() {
               >
                 Clear All
               </button>
+              <span className="text-[var(--card-border)]">|</span>
+              <button
+                className="text-[10px] text-amber-400 hover:text-amber-300 transition-colors flex items-center gap-1 disabled:opacity-40"
+                onClick={handleRefreshIndices}
+                disabled={refreshing}
+                title="Force-refresh index data from NSE (clears cache)"
+              >
+                <span
+                  className={`inline-block w-3 h-3 ${refreshing ? "animate-spin" : ""}`}
+                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                >
+                  {refreshing ? "⟳" : "↻"}
+                </span>
+                {refreshing ? "Refreshing…" : "Refresh from NSE"}
+              </button>
             </div>
           </div>
+
+          {refreshResult && (
+            <div
+              className={`mb-3 rounded-lg px-3 py-2 text-xs ${
+                refreshResult.includes("failed")
+                  ? "bg-red-500/10 text-red-400 border border-red-500/20"
+                  : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+              }`}
+            >
+              {refreshResult}
+            </div>
+          )}
 
           {indicesLoading ? (
             <p className="text-xs text-[var(--muted)]">Loading indices…</p>

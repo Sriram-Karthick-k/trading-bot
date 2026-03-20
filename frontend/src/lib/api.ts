@@ -165,6 +165,20 @@ export const config = {
     request("/config/risk/kill-switch/activate", { method: "POST" }),
   deactivateKillSwitch: () =>
     request("/config/risk/kill-switch/deactivate", { method: "POST" }),
+  // Trading mode
+  getTradingMode: () =>
+    request<import("@/types").TradingModeResponse>("/config/trading-mode"),
+  setTradingMode: (mode: import("@/types").TradingMode) =>
+    request<import("@/types").TradingModeSwitchResult>("/config/trading-mode", {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    }),
+  getTradingModeStatus: () =>
+    request<import("@/types").TradingModeStatus>("/config/trading-mode/status"),
+  resetPaperTrading: () =>
+    request<{ status: string; paper_status: import("@/types").PaperStatus }>("/config/trading-mode/reset", {
+      method: "POST",
+    }),
 };
 
 // ── Mock ────────────────────────────────────────────────
@@ -367,6 +381,15 @@ export interface CPRIndexInfo {
   constituent_count: number;
 }
 
+export interface RefreshIndicesResult {
+  status: string;
+  redis_keys_cleared: number;
+  indices_fetched: number;
+  indices_failed: number;
+  succeeded: Record<string, { constituent_count: number; last_price: number }>;
+  failed: string[];
+}
+
 export const backtest = {
   run: (params: BacktestParams) =>
     request<BacktestResult>("/backtest/run", {
@@ -380,4 +403,55 @@ export const backtest = {
     }),
   cprIndices: () =>
     request<{ indices: CPRIndexInfo[] }>("/backtest/cpr-scan/indices"),
+  refreshIndices: () =>
+    request<RefreshIndicesResult>("/backtest/cpr-scan/refresh", {
+      method: "POST",
+    }),
+};
+
+// ── Journal ────────────────────────────────────────────
+
+export const journal = {
+  getTrades: (params?: {
+    symbol?: string;
+    strategy?: string;
+    from_date?: string;
+    to_date?: string;
+    closed_only?: boolean;
+    limit?: number;
+  }) => {
+    const searchParams = new URLSearchParams();
+    if (params?.symbol) searchParams.set("symbol", params.symbol);
+    if (params?.strategy) searchParams.set("strategy", params.strategy);
+    if (params?.from_date) searchParams.set("from_date", params.from_date);
+    if (params?.to_date) searchParams.set("to_date", params.to_date);
+    if (params?.closed_only) searchParams.set("closed_only", "true");
+    if (params?.limit) searchParams.set("limit", String(params.limit));
+    const qs = searchParams.toString();
+    return request<import("@/types").JournalTradesResponse>(
+      `/journal/trades${qs ? `?${qs}` : ""}`,
+    );
+  },
+  getTrade: (tradeId: string) =>
+    request<import("@/types").JournalTrade>(`/journal/trades/${tradeId}`),
+  getDailyPnl: (params?: { from_date?: string; to_date?: string; days?: number }) => {
+    const searchParams = new URLSearchParams();
+    if (params?.from_date) searchParams.set("from_date", params.from_date);
+    if (params?.to_date) searchParams.set("to_date", params.to_date);
+    if (params?.days) searchParams.set("days", String(params.days));
+    const qs = searchParams.toString();
+    return request<import("@/types").DailyPnLResponse>(
+      `/journal/daily-pnl${qs ? `?${qs}` : ""}`,
+    );
+  },
+  getTodayPnl: () =>
+    request<import("@/types").DailyPnL>("/journal/daily-pnl/today"),
+  getPerformance: () =>
+    request<import("@/types").PerformanceSummary>("/journal/performance"),
+  getSession: () =>
+    request<import("@/types").SessionSummary>("/journal/session"),
+  reset: () =>
+    request<{ status: string; trades: number }>("/journal/reset", {
+      method: "POST",
+    }),
 };

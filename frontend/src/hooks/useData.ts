@@ -10,7 +10,7 @@
  */
 
 import useSWR from "swr";
-import { orders, portfolio, strategies, config, providers, mock, engine } from "@/lib/api";
+import { orders, portfolio, strategies, config, providers, mock, engine, journal } from "@/lib/api";
 import type {
   Order,
   Position,
@@ -24,6 +24,12 @@ import type {
   EngineStatus,
   EnginePick,
   EngineEvent,
+  TradingModeResponse,
+  TradingModeStatus,
+  JournalTradesResponse,
+  DailyPnL,
+  PerformanceSummary,
+  SessionSummary,
 } from "@/types";
 
 const fetcher = <T>(fn: () => Promise<T>) => fn();
@@ -115,5 +121,67 @@ export function useEngineEvents(limit = 50) {
     `engine-events-${limit}`,
     () => fetcher(() => engine.getEvents(limit)),
     { refreshInterval: 10000 },
+  );
+}
+
+/** Trading mode — polls every 10s as fallback for mode changes. */
+export function useTradingMode() {
+  return useSWR<TradingModeResponse>(
+    "trading-mode",
+    () => fetcher(config.getTradingMode),
+    { refreshInterval: 10000 },
+  );
+}
+
+/** Detailed paper trading status — only active in paper mode. */
+export function useTradingModeStatus() {
+  return useSWR<TradingModeStatus>(
+    "trading-mode-status",
+    () => fetcher(config.getTradingModeStatus),
+    { refreshInterval: 5000 },
+  );
+}
+
+// ── Journal Hooks ──────────────────────────────────────────
+
+/** Recent journal trades — polls every 10s (WS-backed as fallback). */
+export function useJournalTrades(params?: {
+  symbol?: string;
+  strategy?: string;
+  closed_only?: boolean;
+  limit?: number;
+}) {
+  const key = `journal-trades-${JSON.stringify(params ?? {})}`;
+  return useSWR<JournalTradesResponse>(
+    key,
+    () => fetcher(() => journal.getTrades(params)),
+    { refreshInterval: 10000 },
+  );
+}
+
+/** Today's P&L — polls every 5s during active trading. */
+export function useTodayPnl() {
+  return useSWR<DailyPnL>(
+    "journal-today-pnl",
+    () => fetcher(journal.getTodayPnl),
+    { refreshInterval: 5000 },
+  );
+}
+
+/** Overall performance metrics — polls every 30s. */
+export function usePerformance() {
+  return useSWR<PerformanceSummary>(
+    "journal-performance",
+    () => fetcher(journal.getPerformance),
+    { refreshInterval: 30000 },
+  );
+}
+
+/** Current session summary — polls every 5s. */
+export function useSessionSummary() {
+  return useSWR<SessionSummary>(
+    "journal-session",
+    () => fetcher(journal.getSession),
+    { refreshInterval: 5000 },
   );
 }

@@ -282,3 +282,167 @@ class TestMockRoutes:
         resp = client.post("/api/mock/reset")
         assert resp.status_code == 200
         assert resp.json()["status"] == "reset"
+
+
+# ── Trading Mode Routes ────────────────────────────────────
+
+
+class TestTradingModeRoutes:
+    """Integration tests for /api/config/trading-mode endpoints."""
+
+    @pytest.fixture(autouse=True)
+    def reset_trading_mode(self):
+        """Ensure trading mode is reset to 'live' before and after each test."""
+        # Reset module-level globals
+        deps._trading_mode = "live"
+        deps._paper_provider = None
+        deps._trading_engine = None
+        deps._order_manager = None
+        # Also reset the deps singleton config manager so lifespan doesn't
+        # restore paper mode from a previous test's set_db_override
+        if deps._config_manager is not None:
+            deps._config_manager.set_db_override("trading.mode", "live")
+        yield
+        # Cleanup after test
+        deps._trading_mode = "live"
+        deps._paper_provider = None
+        deps._trading_engine = None
+        deps._order_manager = None
+        if deps._config_manager is not None:
+            deps._config_manager.set_db_override("trading.mode", "live")
+
+    def test_get_trading_mode_default(self, client):
+        """Default trading mode should be 'live'."""
+        resp = client.get("/api/config/trading-mode")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mode"] == "live"
+        assert data["is_paper"] is False
+
+    def test_switch_to_paper_mode(self, client):
+        """Switching to paper mode should succeed when engine is idle."""
+        resp = client.put("/api/config/trading-mode", json={"mode": "paper"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["old_mode"] == "live"
+        assert data["new_mode"] == "paper"
+        assert data["engine_reset"] is True
+
+        # Verify mode is now paper
+        resp = client.get("/api/config/trading-mode")
+        assert resp.status_code == 200
+        assert resp.json()["mode"] == "paper"
+        assert resp.json()["is_paper"] is True
+
+    def test_switch_to_live_mode(self, client):
+        """Switching from paper to live should succeed."""
+        # First switch to paper
+        deps._trading_mode = "paper"
+
+        resp = client.put("/api/config/trading-mode", json={"mode": "live"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["old_mode"] == "paper"
+        assert data["new_mode"] == "live"
+        assert data["engine_reset"] is True
+
+    def test_switch_same_mode_is_noop(self, client):
+        """Switching to the same mode should be a no-op (no engine_reset)."""
+        resp = client.put("/api/config/trading-mode", json={"mode": "live"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["old_mode"] == "live"
+        assert data["new_mode"] == "live"
+        assert data["engine_reset"] is False
+
+    def test_switch_to_invalid_mode(self, client):
+        """Invalid mode should return 400."""
+        resp = client.put("/api/config/trading-mode", json={"mode": "invalid"})
+        assert resp.status_code == 400
+
+    def test_trading_mode_status_live(self, client):
+        """Status endpoint in live mode should report no paper_status."""
+        resp = client.get("/api/config/trading-mode/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mode"] == "live"
+        assert data["is_paper"] is False
+        assert data["paper_status"] is None
+
+    def test_trading_mode_status_paper(self, client):
+        """Status endpoint in paper mode should report paper session details."""
+        # Switch to paper via the API
+        client.put("/api/config/trading-mode", json={"mode": "paper"})
+
+        resp = client.get("/api/config/trading-mode/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mode"] == "paper"
+        assert data["is_paper"] is True
+        # paper_status may be None if provider isn't PaperTradingProvider
+        # (depends on what get_provider returns in test context)
+
+    def test_reset_paper_trading_not_in_paper_mode(self, client):
+        """Reset should fail when not in paper mode."""
+        resp = client.post("/api/config/trading-mode/reset")
+        assert resp.status_code == 400
+        assert "Not in paper trading mode" in resp.json()["detail"]
+
+    def test_reset_paper_trading_in_paper_mode(self, client):
+        """Reset should work when in paper mode with PaperTradingProvider."""
+        from app.providers.paper.provider import PaperTradingProvider
+
+        # Switch to paper via API
+        client.put("/api/config/trading-mode", json={"mode": "paper"})
+
+        # The provider from get_provider() in paper mode wraps the active provider.
+        # Since we're using dependency override, we need to set _paper_provider directly.
+        from app.providers.registry import get_active_provider
+        try:
+            real = get_active_provider()
+        except Exception:
+            real = MockProvider(clock=VirtualClock())
+
+        paper_prov = PaperTradingProvider(real_provider=real, initial_capital=500_000)
+        deps._paper_provider = paper_prov
+
+        # Override get_provider to return the paper provider
+        original_override = app.dependency_overrides.get(deps.get_provider)
+        app.dependency_overrides[deps.get_provider] = lambda: paper_prov
+
+        resp = client.post("/api/config/trading-mode/reset")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "reset"
+        assert "paper_status" in data
+        assert data["paper_status"]["initial_capital"] == 500_000
+        assert data["paper_status"]["total_orders"] == 0
+
+        # Restore original override
+        if original_override:
+            app.dependency_overrides[deps.get_provider] = original_override
+
+    def test_trading_mode_route_not_shadowed_by_key_catchall(self, client):
+        """
+        Regression: /api/config/trading-mode must NOT be caught by /{key}.
+        This was the critical bug fixed by reordering routes in config.py.
+        """
+        resp = client.get("/api/config/trading-mode")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Should be the trading-mode handler, not the /{key} handler
+        assert "mode" in data
+        assert "is_paper" in data
+        # The /{key} handler would return {"key": "trading-mode", "value": ...}
+        assert "key" not in data
+
+    def test_trading_mode_status_route_not_shadowed(self, client):
+        """
+        Regression: /api/config/trading-mode/status must NOT match /{key}.
+        """
+        resp = client.get("/api/config/trading-mode/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "mode" in data
+        assert "is_paper" in data
+        assert "paper_status" in data

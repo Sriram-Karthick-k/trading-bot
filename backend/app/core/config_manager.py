@@ -302,6 +302,7 @@ class ConfigManager:
 # Core platform config keys. Strategies register their own keys.
 
 _DEFAULT_SCHEMAS = [
+    ConfigSchema(key="trading.mode", description="Trading mode: live places real orders, paper simulates fills using real market data", default="live", type="str", enum_values=["live", "paper"]),
     ConfigSchema(key="provider.active", description="Currently active provider name", default="zerodha", type="str", enum_values=["zerodha", "mock"]),
     ConfigSchema(key="risk.max_daily_loss", description="Maximum daily loss in INR before halting", default=5000.0, type="float", min_value=0),
     ConfigSchema(key="risk.max_daily_loss_pct", description="Maximum daily loss as % of capital", default=3.0, type="float", min_value=0, max_value=100),

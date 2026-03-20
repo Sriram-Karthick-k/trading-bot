@@ -8,6 +8,11 @@ import {
   useStrategies,
   useEngineStatus,
   useEngineEvents,
+  useTradingMode,
+  useSessionSummary,
+  useJournalTrades,
+  usePerformance,
+  useTodayPnl,
 } from "@/hooks/useData";
 import { useEngineStream } from "@/hooks/useEngineStream";
 import {
@@ -20,7 +25,7 @@ import {
   type CPRStockEntry,
   type CPRIndexInfo,
 } from "@/lib/api";
-import type { EngineEvent, EngineStrategyDetail } from "@/types";
+import type { EngineEvent, EngineStrategyDetail, JournalTrade } from "@/types";
 import { formatCurrency, formatPnl, formatNumber, cn } from "@/lib/utils";
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -33,6 +38,7 @@ export default function TradingCommandCenter() {
     type: "success" | "error";
     text: string;
   } | null>(null);
+  const { data: tradingMode } = useTradingMode();
 
   // Handle Zerodha redirect auth result
   useEffect(() => {
@@ -50,8 +56,23 @@ export default function TradingCommandCenter() {
     }
   }, []);
 
+  const isPaper = tradingMode?.is_paper ?? false;
+
   return (
     <div className="p-6 lg:p-8 space-y-6 max-w-[1800px] mx-auto">
+      {/* Paper trading banner */}
+      {isPaper && (
+        <div className="bg-amber-500/10 border-2 border-amber-500/30 rounded-lg px-4 py-2.5 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span className="text-amber-400 text-sm font-semibold">PAPER TRADING MODE</span>
+            <span className="text-amber-400/60 text-xs">Simulated fills only — no real orders</span>
+          </div>
+          <a href="/settings" className="text-xs text-amber-400/80 hover:text-amber-300 transition-colors underline underline-offset-2">
+            Switch to Live
+          </a>
+        </div>
+      )}
       {/* Auth notification */}
       {authMsg && (
         <div
@@ -82,6 +103,12 @@ export default function TradingCommandCenter() {
 
       {/* ── Section 3: Engine Control ────────────────────────── */}
       <EngineControlPanel />
+
+      {/* ── Section 3b: Session Summary + Performance ────────── */}
+      <SessionPerformanceBar />
+
+      {/* ── Section 3c: Trade Journal ────────────────────────── */}
+      <TradeJournalPanel />
 
       {/* ── Section 4: Positions + Risk side by side ─────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
@@ -1040,6 +1067,11 @@ function EngineControlPanel() {
             Trading Engine
           </h3>
           <EngineStateBadge state={state} />
+          {status?.is_paper && (
+            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">
+              Paper
+            </span>
+          )}
           {hasPicks && (
             <span className="text-xs text-[var(--muted)]">
               {status!.picks_count} picks loaded
@@ -1679,6 +1711,354 @@ function OrderStatusBadge({ status }: { status: string }) {
   return (
     <span className={cn("text-[10px]", styles[status] || "badge-info")}>
       {status}
+    </span>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SECTION 7 — SESSION PERFORMANCE BAR
+   Today's P&L, Win Rate, Performance Metrics — compact top-level summary
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function SessionPerformanceBar() {
+  const { data: session, isLoading } = useSessionSummary();
+  const { data: todayPnl } = useTodayPnl();
+  const { data: perf } = usePerformance();
+
+  if (isLoading) {
+    return (
+      <div className="card">
+        <p className="text-[var(--muted)] text-sm">Loading session...</p>
+      </div>
+    );
+  }
+
+  const today = todayPnl ?? session?.today_pnl;
+  const performance = perf ?? session?.performance;
+
+  return (
+    <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-4">
+      {/* Today's P&L */}
+      <div className="card !p-4">
+        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
+          Today&apos;s P&amp;L
+        </p>
+        <p
+          className={cn(
+            "text-lg font-bold",
+            (today?.net_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
+          )}
+          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+        >
+          {formatPnl(today?.net_pnl ?? 0)}
+        </p>
+        <p className="text-[10px] text-[var(--muted)] mt-1">
+          {today?.total_trades ?? 0} trades
+          {today?.win_rate ? ` · ${today.win_rate}% win` : ""}
+        </p>
+      </div>
+
+      {/* Session P&L */}
+      <div className="card !p-4">
+        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
+          Session P&amp;L
+        </p>
+        <p
+          className={cn(
+            "text-lg font-bold",
+            (session?.session_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
+          )}
+          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+        >
+          {formatPnl(session?.session_pnl ?? 0)}
+        </p>
+        <p className="text-[10px] text-[var(--muted)] mt-1">
+          {session?.open_trades ?? 0} open · {session?.closed_trades ?? 0} closed
+        </p>
+      </div>
+
+      {/* Win Rate */}
+      <div className="card !p-4">
+        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
+          Win Rate
+        </p>
+        <p
+          className="text-lg font-bold"
+          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+        >
+          {performance?.win_rate?.toFixed(1) ?? "0.0"}%
+        </p>
+        <p className="text-[10px] text-[var(--muted)] mt-1">
+          {performance?.winning_trades ?? 0}W / {performance?.losing_trades ?? 0}L
+        </p>
+      </div>
+
+      {/* Profit Factor */}
+      <div className="card !p-4">
+        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
+          Profit Factor
+        </p>
+        <p
+          className={cn(
+            "text-lg font-bold",
+            (performance?.profit_factor ?? 0) >= 1.5 ? "text-emerald-400" :
+            (performance?.profit_factor ?? 0) >= 1.0 ? "text-amber-400" : "text-red-400"
+          )}
+          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+        >
+          {performance?.profit_factor?.toFixed(2) ?? "0.00"}
+        </p>
+        <p className="text-[10px] text-[var(--muted)] mt-1">
+          Avg win {formatCurrency(performance?.avg_winner ?? 0)}
+        </p>
+      </div>
+
+      {/* Max Drawdown */}
+      <div className="card !p-4">
+        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
+          Max Drawdown
+        </p>
+        <p
+          className="text-lg font-bold text-red-400"
+          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+        >
+          {formatCurrency(performance?.max_drawdown ?? 0)}
+        </p>
+        <p className="text-[10px] text-[var(--muted)] mt-1">
+          Avg loss {formatCurrency(performance?.avg_loser ?? 0)}
+        </p>
+      </div>
+
+      {/* Avg Trade Duration */}
+      <div className="card !p-4">
+        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
+          Avg Duration
+        </p>
+        <p
+          className="text-lg font-bold"
+          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+        >
+          {performance?.avg_trade_duration_min?.toFixed(0) ?? "0"}
+          <span className="text-xs text-[var(--muted)] ml-0.5">min</span>
+        </p>
+        <p className="text-[10px] text-[var(--muted)] mt-1">
+          {performance?.total_trades ?? 0} total trades
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SECTION 8 — TRADE JOURNAL TABLE
+   Recent trades with direction, P&L, exit reason, and status
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function TradeJournalPanel() {
+  const [showClosedOnly, setShowClosedOnly] = useState(false);
+  const [symbolFilter, setSymbolFilter] = useState("");
+
+  const { data, isLoading } = useJournalTrades({
+    closed_only: showClosedOnly,
+    symbol: symbolFilter || undefined,
+    limit: 20,
+  });
+
+  const trades = data?.trades ?? [];
+  const totalCount = data?.total ?? 0;
+
+  return (
+    <div className="card">
+      {/* Header + Filters */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm font-semibold">Trade Journal</h3>
+          <span className="text-[10px] text-[var(--muted)]">
+            {totalCount} trade{totalCount !== 1 ? "s" : ""}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            placeholder="Filter symbol..."
+            value={symbolFilter}
+            onChange={(e) => setSymbolFilter(e.target.value.toUpperCase())}
+            className="h-7 px-2.5 text-xs rounded-md border border-[var(--card-border)] bg-transparent focus:outline-none focus:border-[var(--accent)] w-32"
+          />
+          <button
+            onClick={() => setShowClosedOnly(!showClosedOnly)}
+            className={cn(
+              "h-7 px-2.5 text-[10px] rounded-md border transition-colors",
+              showClosedOnly
+                ? "border-[var(--accent)] text-[var(--accent)] bg-[var(--accent)]/10"
+                : "border-[var(--card-border)] text-[var(--muted)] hover:text-[var(--foreground)]"
+            )}
+          >
+            Closed Only
+          </button>
+        </div>
+      </div>
+
+      {isLoading && (
+        <p className="text-[var(--muted)] text-sm text-center py-6">Loading trades...</p>
+      )}
+
+      {!isLoading && trades.length === 0 && (
+        <p className="text-[var(--muted)] text-xs text-center py-8">
+          No trades recorded yet. Start the engine to begin tracking.
+        </p>
+      )}
+
+      {!isLoading && trades.length > 0 && (
+        <div className="overflow-x-auto -mx-6 px-6">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-[10px] text-[var(--muted)] uppercase tracking-wider border-b border-[var(--card-border)]">
+                <th className="text-left pb-2 pr-3">Symbol</th>
+                <th className="text-left pb-2 pr-3">Dir</th>
+                <th className="text-right pb-2 pr-3">Entry</th>
+                <th className="text-right pb-2 pr-3">Exit</th>
+                <th className="text-right pb-2 pr-3">Qty</th>
+                <th className="text-right pb-2 pr-3">P&amp;L</th>
+                <th className="text-right pb-2 pr-3">P&amp;L %</th>
+                <th className="text-right pb-2 pr-3">R:R</th>
+                <th className="text-left pb-2 pr-3">Exit Reason</th>
+                <th className="text-right pb-2 pr-3">Duration</th>
+                <th className="text-center pb-2">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trades.map((t) => (
+                <TradeRow key={t.trade_id} trade={t} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TradeRow({ trade }: { trade: JournalTrade }) {
+  const isProfit = trade.pnl >= 0;
+  const mono = { fontFamily: "'JetBrains Mono', monospace" } as const;
+
+  return (
+    <tr className="border-b border-[var(--card-border)]/50 hover:bg-white/[0.015] transition-colors">
+      {/* Symbol */}
+      <td className="py-2.5 pr-3">
+        <div className="flex items-center gap-1.5">
+          <span className="font-medium">{trade.trading_symbol}</span>
+          {trade.is_paper && (
+            <span className="text-[9px] text-amber-400/70 bg-amber-500/10 px-1 rounded">
+              PAPER
+            </span>
+          )}
+        </div>
+      </td>
+
+      {/* Direction */}
+      <td className="py-2.5 pr-3">
+        <span
+          className={cn(
+            "text-[10px] font-bold px-1.5 py-0.5 rounded",
+            trade.direction === "LONG"
+              ? "bg-emerald-500/10 text-emerald-400"
+              : "bg-red-500/10 text-red-400"
+          )}
+        >
+          {trade.direction}
+        </span>
+      </td>
+
+      {/* Entry Price */}
+      <td className="py-2.5 pr-3 text-right" style={mono}>
+        {formatNumber(trade.entry_price, 2)}
+      </td>
+
+      {/* Exit Price */}
+      <td className="py-2.5 pr-3 text-right text-[var(--muted)]" style={mono}>
+        {trade.exit_price ? formatNumber(trade.exit_price, 2) : "—"}
+      </td>
+
+      {/* Quantity */}
+      <td className="py-2.5 pr-3 text-right" style={mono}>
+        {trade.quantity}
+      </td>
+
+      {/* P&L */}
+      <td
+        className={cn(
+          "py-2.5 pr-3 text-right font-medium",
+          trade.is_open ? "text-[var(--muted)]" : isProfit ? "text-emerald-400" : "text-red-400"
+        )}
+        style={mono}
+      >
+        {trade.is_open ? "—" : formatPnl(trade.pnl)}
+      </td>
+
+      {/* P&L % */}
+      <td
+        className={cn(
+          "py-2.5 pr-3 text-right",
+          trade.is_open ? "text-[var(--muted)]" : isProfit ? "text-emerald-400" : "text-red-400"
+        )}
+        style={mono}
+      >
+        {trade.is_open ? "—" : `${trade.pnl_pct >= 0 ? "+" : ""}${trade.pnl_pct.toFixed(2)}%`}
+      </td>
+
+      {/* Risk:Reward Actual */}
+      <td className="py-2.5 pr-3 text-right" style={mono}>
+        {trade.risk_reward_actual != null ? trade.risk_reward_actual.toFixed(2) : "—"}
+      </td>
+
+      {/* Exit Reason */}
+      <td className="py-2.5 pr-3 text-left">
+        <ExitReasonBadge reason={trade.exit_reason} isOpen={trade.is_open} />
+      </td>
+
+      {/* Duration */}
+      <td className="py-2.5 pr-3 text-right text-[var(--muted)]" style={mono}>
+        {trade.duration_minutes != null
+          ? `${trade.duration_minutes.toFixed(0)}m`
+          : "—"}
+      </td>
+
+      {/* Status */}
+      <td className="py-2.5 text-center">
+        <span
+          className={cn(
+            "inline-block w-2 h-2 rounded-full",
+            trade.is_open ? "bg-amber-400 animate-pulse" : isProfit ? "bg-emerald-400" : "bg-red-400"
+          )}
+          title={trade.is_open ? "Open" : isProfit ? "Winner" : "Loser"}
+        />
+      </td>
+    </tr>
+  );
+}
+
+function ExitReasonBadge({ reason, isOpen }: { reason: string; isOpen: boolean }) {
+  if (isOpen || !reason) {
+    return <span className="text-[10px] text-amber-400/70">ACTIVE</span>;
+  }
+
+  const styles: Record<string, string> = {
+    target: "text-emerald-400 bg-emerald-500/10",
+    stop_loss: "text-red-400 bg-red-500/10",
+    trailing_sl: "text-amber-400 bg-amber-500/10",
+    eod: "text-blue-400 bg-blue-500/10",
+    engine_stop: "text-[var(--muted)] bg-white/5",
+    manual: "text-purple-400 bg-purple-500/10",
+  };
+
+  const label = reason.replace(/_/g, " ").toUpperCase();
+  const style = styles[reason] || "text-[var(--muted)] bg-white/5";
+
+  return (
+    <span className={cn("text-[10px] font-medium px-1.5 py-0.5 rounded", style)}>
+      {label}
     </span>
   );
 }

@@ -35,9 +35,16 @@ dev-stop: ## Stop background dev servers started by 'make dev'
 		kill $$(cat .pid.frontend) 2>/dev/null && echo "Frontend stopped" || echo "Frontend already stopped"; \
 		rm -f .pid.frontend; \
 	fi
-	@# Also kill any orphaned uvicorn/next processes on the ports
+	@# Also kill any orphaned backend/frontend processes
 	@pkill -f "[u]vicorn app.main:app" 2>/dev/null || true
 	@pkill -f "[n]ext dev" 2>/dev/null || true
+	@pkill -f "[n]ode server.mjs" 2>/dev/null || true
+	@pkill -f "[n]ext/dist/bin/next" 2>/dev/null || true
+	@# Free commonly used dev ports in case descendants survived
+	@fuser -k 8000/tcp 2>/dev/null || true
+	@fuser -k 3000/tcp 2>/dev/null || true
+	@# Stop only the infra services started by `make dev`
+	@docker compose stop postgres redis 2>/dev/null || true
 	@echo "Done."
 
 stop: dev-stop ## Alias for dev-stop

@@ -141,10 +141,9 @@ class TestFallbackConstituents:
         assert len(_FALLBACK_CONSTITUENTS["NIFTY IT"]) == 4
 
     def test_empty_indices_exist(self):
-        """Some indices have no fallback constituents."""
-        assert _FALLBACK_CONSTITUENTS["NIFTY METAL"] == []
-        assert _FALLBACK_CONSTITUENTS["NIFTY REALTY"] == []
-        assert _FALLBACK_CONSTITUENTS["NIFTY MEDIA"] == []
+        """All fallback indices should now have some constituents (no empty lists)."""
+        for name, stocks in _FALLBACK_CONSTITUENTS.items():
+            assert len(stocks) > 0, f"{name} should have fallback constituents"
 
     def test_all_values_are_string_lists(self):
         for name, stocks in _FALLBACK_CONSTITUENTS.items():
@@ -191,11 +190,12 @@ class TestListIndices:
         nifty50 = next(i for i in data["indices"] if i["name"] == "NIFTY 50")
         assert nifty50["constituent_count"] == 20
 
-    def test_empty_index_has_zero_count(self, client):
+    def test_all_indices_have_nonzero_count(self, client):
         resp = client.get("/api/backtest/cpr-scan/indices")
         data = resp.json()
-        metal = next(i for i in data["indices"] if i["name"] == "NIFTY METAL")
-        assert metal["constituent_count"] == 0
+        for idx in data["indices"]:
+            assert idx["constituent_count"] > 0, \
+                f"{idx['name']} should have constituents in fallback data"
 
     def test_all_index_names_present(self, client):
         resp = client.get("/api/backtest/cpr-scan/indices")
@@ -238,16 +238,16 @@ class TestCPRScanValidation:
         assert data["summary"]["total_stocks_scanned"] == 0
         assert data["scan_params"]["unique_stocks"] == 0
 
-    def test_indices_with_no_constituents(self, client):
-        """Scanning indices with empty constituent lists returns empty + error."""
+    def test_indices_with_constituents_return_stocks(self, client):
+        """Scanning indices that now have fallback constituents should return stocks or errors."""
         resp = client.post("/api/backtest/cpr-scan", json={
-            "scan_date": "2025-01-15",
+            "scan_date": "2025-06-15",
             "indices": ["NIFTY METAL", "NIFTY REALTY", "NIFTY MEDIA"],
+            "narrow_threshold": 5.0,
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert data["summary"]["total_stocks_scanned"] == 0
-        assert data["scan_params"]["unique_stocks"] == 0
+        assert data["scan_params"]["unique_stocks"] > 0
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -651,3 +651,94 @@ class TestCPRScanDateEdgeCases:
             dates = list(results.keys())
             assert results[dates[0]] != results[dates[1]], \
                 "Different scan dates should use different prev_day candles → different CPR"
+
+
+# ═══════════════════════════════════════════════════════════════
+#  POST /backtest/cpr-scan/refresh — force-refresh NSE data
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestForceRefreshEndpoint:
+    """Tests for the POST /backtest/cpr-scan/refresh endpoint."""
+
+    def test_refresh_returns_status(self, client):
+        """Force-refresh endpoint should return refresh status."""
+        # Override the NSE service mock to support refresh
+        from app.services.nse_index import IndexData, IndexConstituent
+        import time as _time
+
+        def _get_mock_nse_service():
+            mock_svc = MagicMock()
+            mock_svc.clear_all_cache = AsyncMock(return_value=5)
+            mock_svc.get_all_constituents = AsyncMock(return_value={
+                "NIFTY 50": IndexData(
+                    index_name="NIFTY 50", last_price=22500, change=100,
+                    change_pct=0.45, constituents=[
+                        IndexConstituent(
+                            symbol="RELIANCE", company_name="Reliance", isin="",
+                            industry="", last_price=2500, change=0, change_pct=0,
+                            ffmc=100, is_fno=True, series="EQ",
+                        ),
+                    ], fetched_at=_time.time(),
+                ),
+                "NIFTY BANK": IndexData(
+                    index_name="NIFTY BANK", last_price=48000, change=200,
+                    change_pct=0.42, constituents=[], fetched_at=_time.time(),
+                ),
+            })
+            mock_svc.get_cache_status.return_value = {"cached_indices": [], "cache_ttl_seconds": 600, "entries": {}}
+            return mock_svc
+
+        with patch("app.api.routes.backtest._get_nse_service", side_effect=_get_mock_nse_service):
+            resp = client.post("/api/backtest/cpr-scan/refresh")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "refreshed"
+        assert data["redis_keys_cleared"] == 5
+        assert data["indices_fetched"] == 2
+        assert "NIFTY 50" in data["succeeded"]
+        assert data["succeeded"]["NIFTY 50"]["constituent_count"] == 1
+
+    def test_refresh_reports_failed_indices(self, client):
+        """Force-refresh should report which indices failed."""
+        def _get_mock_nse_service():
+            mock_svc = MagicMock()
+            mock_svc.clear_all_cache = AsyncMock(return_value=0)
+            # Return only 1 index — the other 15 are "failed"
+            from app.services.nse_index import IndexData
+            import time as _time
+            mock_svc.get_all_constituents = AsyncMock(return_value={
+                "NIFTY 50": IndexData(
+                    index_name="NIFTY 50", last_price=22000, change=0,
+                    change_pct=0, constituents=[], fetched_at=_time.time(),
+                ),
+            })
+            mock_svc.get_cache_status.return_value = {"cached_indices": [], "cache_ttl_seconds": 600, "entries": {}}
+            return mock_svc
+
+        with patch("app.api.routes.backtest._get_nse_service", side_effect=_get_mock_nse_service):
+            resp = client.post("/api/backtest/cpr-scan/refresh")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["indices_fetched"] == 1
+        assert data["indices_failed"] == 15
+        assert "NIFTY BANK" in data["failed"]
+
+    def test_refresh_502_on_total_failure(self, client):
+        """If NSE fetch throws an exception, should return 502."""
+        def _get_mock_nse_service():
+            mock_svc = MagicMock()
+            mock_svc.clear_all_cache = AsyncMock(return_value=0)
+            mock_svc.get_all_constituents = AsyncMock(
+                side_effect=Exception("NSE completely down")
+            )
+            mock_svc.get_cache_status.return_value = {"cached_indices": [], "cache_ttl_seconds": 600, "entries": {}}
+            return mock_svc
+
+        with patch("app.api.routes.backtest._get_nse_service", side_effect=_get_mock_nse_service):
+            resp = client.post("/api/backtest/cpr-scan/refresh")
+
+        assert resp.status_code == 502
+        assert "NSE fetch failed" in resp.json()["detail"]

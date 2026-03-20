@@ -6,7 +6,7 @@
 const mockFetch = jest.fn();
 global.fetch = mockFetch;
 
-import { health, orders, portfolio, auth, config, mock, strategies, providers, market, engine } from "@/lib/api";
+import { health, orders, portfolio, auth, config, mock, strategies, providers, market, engine, journal, backtest } from "@/lib/api";
 
 beforeEach(() => {
   mockFetch.mockReset();
@@ -400,6 +400,213 @@ describe("engine", () => {
     expect(mockFetch).toHaveBeenCalledWith(
       "http://localhost:8000/api/engine/feed-candle",
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+});
+
+describe("journal", () => {
+  it("getTrades calls GET /journal/trades with no params", async () => {
+    mockResponse({ trades: [], total: 0 });
+    const r = await journal.getTrades();
+    expect(r.trades).toEqual([]);
+    expect(r.total).toBe(0);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/journal/trades",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("getTrades builds query string from params", async () => {
+    mockResponse({ trades: [], total: 0 });
+    await journal.getTrades({
+      symbol: "RELIANCE",
+      closed_only: true,
+      limit: 10,
+    });
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("symbol=RELIANCE");
+    expect(url).toContain("closed_only=true");
+    expect(url).toContain("limit=10");
+  });
+
+  it("getTrades builds query string with date filters", async () => {
+    mockResponse({ trades: [], total: 0 });
+    await journal.getTrades({
+      strategy: "cpr_breakout",
+      from_date: "2025-06-01",
+      to_date: "2025-06-15",
+    });
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("strategy=cpr_breakout");
+    expect(url).toContain("from_date=2025-06-01");
+    expect(url).toContain("to_date=2025-06-15");
+  });
+
+  it("getTrade calls GET /journal/trades/:id", async () => {
+    const trade = {
+      trade_id: "t1",
+      strategy_id: "s1",
+      symbol: "RELIANCE",
+      direction: "LONG",
+      status: "closed",
+      entry_price: 2500,
+      exit_price: 2550,
+      quantity: 10,
+      pnl: 500,
+      pnl_pct: 2.0,
+      entry_time: "2025-06-01T09:20:00",
+      exit_time: "2025-06-01T10:30:00",
+      exit_reason: "target",
+      is_paper: false,
+    };
+    mockResponse(trade);
+    const r = await journal.getTrade("t1");
+    expect(r.trade_id).toBe("t1");
+    expect(r.symbol).toBe("RELIANCE");
+    expect(r.pnl).toBe(500);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/journal/trades/t1",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("getDailyPnl calls GET /journal/daily-pnl with params", async () => {
+    mockResponse({ daily_pnl: [], total_pnl: 0 });
+    await journal.getDailyPnl({ days: 7 });
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("/journal/daily-pnl");
+    expect(url).toContain("days=7");
+  });
+
+  it("getDailyPnl calls GET /journal/daily-pnl with no params", async () => {
+    mockResponse({ daily_pnl: [], total_pnl: 0 });
+    await journal.getDailyPnl();
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/journal/daily-pnl",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("getTodayPnl calls GET /journal/daily-pnl/today", async () => {
+    const todayPnl = {
+      date: "2025-06-15",
+      realized_pnl: 1500,
+      unrealized_pnl: 300,
+      total_pnl: 1800,
+      trades_count: 5,
+      winning_trades: 3,
+      losing_trades: 2,
+    };
+    mockResponse(todayPnl);
+    const r = await journal.getTodayPnl();
+    expect(r.total_pnl).toBe(1800);
+    expect(r.trades_count).toBe(5);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/journal/daily-pnl/today",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("getPerformance calls GET /journal/performance", async () => {
+    const perf = {
+      total_trades: 50,
+      winning_trades: 30,
+      losing_trades: 20,
+      win_rate: 60.0,
+      total_pnl: 25000,
+      avg_pnl: 500,
+      max_win: 5000,
+      max_loss: -2000,
+      profit_factor: 2.5,
+      avg_win: 1200,
+      avg_loss: -625,
+      max_drawdown: -8000,
+      avg_duration_minutes: 45,
+    };
+    mockResponse(perf);
+    const r = await journal.getPerformance();
+    expect(r.win_rate).toBe(60.0);
+    expect(r.profit_factor).toBe(2.5);
+    expect(r.total_trades).toBe(50);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/journal/performance",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("getSession calls GET /journal/session", async () => {
+    const session = {
+      session_date: "2025-06-15",
+      engine_started_at: "2025-06-15T09:15:00",
+      total_trades: 8,
+      open_trades: 2,
+      closed_trades: 6,
+      realized_pnl: 3000,
+      unrealized_pnl: 500,
+      total_pnl: 3500,
+      win_rate: 66.7,
+      best_trade_pnl: 2000,
+      worst_trade_pnl: -800,
+    };
+    mockResponse(session);
+    const r = await journal.getSession();
+    expect(r.total_trades).toBe(8);
+    expect(r.realized_pnl).toBe(3000);
+    expect(r.session_date).toBe("2025-06-15");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/journal/session",
+      expect.objectContaining({ headers: expect.any(Object) }),
+    );
+  });
+
+  it("reset sends POST /journal/reset", async () => {
+    mockResponse({ status: "reset", trades: 15 });
+    const r = await journal.reset();
+    expect(r.status).toBe("reset");
+    expect(r.trades).toBe(15);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/journal/reset",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+});
+
+// ── Backtest / CPR Scanner ─────────────────────────────────
+describe("backtest", () => {
+  it("refreshIndices sends POST /backtest/cpr-scan/refresh", async () => {
+    const result = {
+      status: "refreshed",
+      redis_keys_cleared: 5,
+      indices_fetched: 14,
+      indices_failed: 2,
+      succeeded: { "NIFTY 50": { constituent_count: 50, last_price: 22500 } },
+      failed: ["NIFTY MEDIA", "NIFTY REALTY"],
+    };
+    mockResponse(result);
+    const r = await backtest.refreshIndices();
+    expect(r.status).toBe("refreshed");
+    expect(r.indices_fetched).toBe(14);
+    expect(r.indices_failed).toBe(2);
+    expect(r.failed).toContain("NIFTY MEDIA");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/backtest/cpr-scan/refresh",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("cprIndices sends GET /backtest/cpr-scan/indices", async () => {
+    mockResponse({
+      indices: [
+        { name: "NIFTY 50", constituent_count: 50 },
+        { name: "NIFTY BANK", constituent_count: 12 },
+      ],
+    });
+    const r = await backtest.cprIndices();
+    expect(r.indices).toHaveLength(2);
+    expect(r.indices[0].name).toBe("NIFTY 50");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:8000/api/backtest/cpr-scan/indices",
+      expect.objectContaining({ headers: expect.any(Object) }),
     );
   });
 });

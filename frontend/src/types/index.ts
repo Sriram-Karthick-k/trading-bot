@@ -186,6 +186,37 @@ export interface Margins {
   };
 }
 
+// ── Trading Mode Types ─────────────────────────────────────
+
+export type TradingMode = "live" | "paper";
+
+export interface TradingModeResponse {
+  mode: TradingMode;
+  is_paper: boolean;
+}
+
+export interface TradingModeSwitchResult {
+  mode: TradingMode;
+  is_paper: boolean;
+  message: string;
+}
+
+export interface PaperStatus {
+  initial_capital: number;
+  available_capital: number;
+  total_orders: number;
+  total_fills: number;
+  open_positions: number;
+  realised_pnl: number;
+  total_brokerage: number;
+}
+
+export interface TradingModeStatus {
+  mode: TradingMode;
+  is_paper: boolean;
+  paper_status: PaperStatus | null;
+}
+
 // ── Engine Types ────────────────────────────────────────────
 
 export type EngineState =
@@ -236,6 +267,7 @@ export interface EngineStatus {
   picks_count: number;
   strategies_count: number;
   ticker_connected: boolean;
+  is_paper: boolean;
   started_at: string | null;
   stopped_at: string | null;
   metrics: {
@@ -263,4 +295,91 @@ export interface EnginePick {
     width: number;
     width_pct: number;
   };
+}
+
+// ── Trade Journal Types ────────────────────────────────────
+
+export interface JournalTrade {
+  trade_id: string;
+  order_id: string;
+  strategy_id: string;
+  trading_symbol: string;
+  exchange: string;
+  direction: "LONG" | "SHORT";
+  entry_price: number;
+  exit_price: number | null;
+  quantity: number;
+  pnl: number;
+  pnl_pct: number;
+  entry_time: string | null;
+  exit_time: string | null;
+  stop_loss: number;
+  target: number;
+  exit_reason: string;
+  is_open: boolean;
+  duration_minutes: number | null;
+  risk_reward_actual: number | null;
+  is_paper: boolean;
+}
+
+export interface JournalTradesResponse {
+  trades: JournalTrade[];
+  total: number;
+  returned: number;
+}
+
+export interface DailyPnL {
+  date: string;
+  total_pnl: number;
+  realized_pnl: number;
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  avg_win: number;
+  avg_loss: number;
+  largest_win: number;
+  largest_loss: number;
+  total_brokerage: number;
+  net_pnl: number;
+  is_paper: boolean;
+}
+
+export interface DailyPnLResponse {
+  daily_pnl: DailyPnL[];
+  total_days: number;
+  cumulative_pnl: number;
+}
+
+export interface PerformanceSummary {
+  total_trading_days: number;
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  avg_daily_pnl: number;
+  best_day_pnl: number;
+  worst_day_pnl: number;
+  max_consecutive_wins: number;
+  max_consecutive_losses: number;
+  avg_trade_pnl: number;
+  avg_winner: number;
+  avg_loser: number;
+  profit_factor: number;
+  max_drawdown: number;
+  sharpe_ratio: number;
+  avg_trade_duration_min: number;
+}
+
+export interface SessionSummary {
+  mode: string;
+  is_paper: boolean;
+  engine_state: string;
+  total_trades: number;
+  open_trades: number;
+  closed_trades: number;
+  session_pnl: number;
+  today_pnl: DailyPnL | null;
+  performance: PerformanceSummary;
 }

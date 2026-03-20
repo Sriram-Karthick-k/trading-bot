@@ -162,6 +162,9 @@ class CPRBreakoutStrategy(Strategy):
         self._target: float = 0.0
         self._traded_today: bool = False     # Only one trade per day
 
+        # Trailing stop loss tracking
+        self._trailing_peak: float = 0.0  # High watermark (LONG) or low watermark (SHORT)
+
         # History of daily OHLC for building CPR
         self._first_candle_seen: bool = False
 
@@ -228,6 +231,24 @@ class CPRBreakoutStrategy(Strategy):
                 min_value=1,
                 max_value=10000,
             ),
+            ParamDef(
+                name="trail_activation_pct",
+                param_type=ParamType.FLOAT,
+                default=0.3,
+                label="Trail Activation %",
+                description="Profit percentage to activate trailing SL (0 = always trail)",
+                min_value=0.0,
+                max_value=5.0,
+            ),
+            ParamDef(
+                name="trail_distance_pct",
+                param_type=ParamType.FLOAT,
+                default=0.2,
+                label="Trail Distance %",
+                description="Trailing SL distance from peak price as percentage",
+                min_value=0.05,
+                max_value=3.0,
+            ),
         ]
 
     def get_instruments(self) -> list[int]:
@@ -235,8 +256,94 @@ class CPRBreakoutStrategy(Strategy):
         return [token] if token else []
 
     async def on_tick(self, tick: TickData) -> None:
-        """Not used for backtesting — signals come from on_candle."""
-        pass
+        """
+        Check SL/target/trailing-SL on every tick for instant exits.
+
+        Called for every raw tick from KiteTicker, so exits happen within
+        seconds of price breach rather than waiting up to 5 minutes for the
+        next completed candle.
+
+        Trailing SL logic:
+        - LONG: if price moves above entry by `trail_activation_pct`%, start
+          trailing. Trail SL to `price - trail_distance` whenever price makes
+          a new high. Never move SL downward.
+        - SHORT: mirror logic for downward moves.
+        """
+        if self._position is None:
+            return
+
+        if tick.instrument_token != self.get_param("instrument_token"):
+            return
+
+        price = tick.last_price
+        if price <= 0:
+            return
+
+        ts = tick.timestamp or datetime.now()
+
+        # ── Trailing stop loss ──────────────────────────────────────
+        trail_pct = self.get_param("trail_activation_pct", 0.3)  # Activate after 0.3% move in profit
+        trail_distance_pct = self.get_param("trail_distance_pct", 0.2)  # Trail by 0.2% from peak
+
+        if self._position == "LONG":
+            # Track high water mark
+            if price > self._trailing_peak:
+                self._trailing_peak = price
+
+            # Activate trailing once price moved trail_pct% above entry
+            profit_pct = ((price - self._entry_price) / self._entry_price) * 100.0
+            if profit_pct >= trail_pct and self._trailing_peak > 0:
+                trail_sl = self._trailing_peak * (1.0 - trail_distance_pct / 100.0)
+                if trail_sl > self._stop_loss:
+                    old_sl = self._stop_loss
+                    self._stop_loss = round(trail_sl, 2)
+                    logger.debug(
+                        "Trailing SL updated LONG %s: %.2f → %.2f (peak=%.2f)",
+                        self.get_param("trading_symbol"), old_sl, self._stop_loss,
+                        self._trailing_peak,
+                    )
+
+            # ── Check SL / target ───────────────────────────────────
+            if price <= self._stop_loss:
+                self._close_position_at_price(
+                    price, ts, f"Tick SL hit at {price:.2f} (SL={self._stop_loss:.2f})"
+                )
+                return
+            if price >= self._target:
+                self._close_position_at_price(
+                    price, ts, f"Tick target hit at {price:.2f} (target={self._target:.2f})"
+                )
+                return
+
+        elif self._position == "SHORT":
+            # Track low water mark
+            if price < self._trailing_peak:
+                self._trailing_peak = price
+
+            # Activate trailing once price moved trail_pct% below entry
+            profit_pct = ((self._entry_price - price) / self._entry_price) * 100.0
+            if profit_pct >= trail_pct and self._trailing_peak > 0:
+                trail_sl = self._trailing_peak * (1.0 + trail_distance_pct / 100.0)
+                if trail_sl < self._stop_loss:
+                    old_sl = self._stop_loss
+                    self._stop_loss = round(trail_sl, 2)
+                    logger.debug(
+                        "Trailing SL updated SHORT %s: %.2f → %.2f (trough=%.2f)",
+                        self.get_param("trading_symbol"), old_sl, self._stop_loss,
+                        self._trailing_peak,
+                    )
+
+            # ── Check SL / target ───────────────────────────────────
+            if price >= self._stop_loss:
+                self._close_position_at_price(
+                    price, ts, f"Tick SL hit at {price:.2f} (SL={self._stop_loss:.2f})"
+                )
+                return
+            if price <= self._target:
+                self._close_position_at_price(
+                    price, ts, f"Tick target hit at {price:.2f} (target={self._target:.2f})"
+                )
+                return
 
     async def on_candle(self, instrument_token: int, candle: Candle) -> None:
         """
@@ -340,6 +447,7 @@ class CPRBreakoutStrategy(Strategy):
             self._stop_loss = self._cpr.bc
             self._target = candle.close + rr * sl_distance
             self._traded_today = True
+            self._trailing_peak = candle.close  # Initialize peak at entry
 
             self._emit_buy_signal(candle, f"CPR breakout LONG — close {candle.close:.2f} > TC {self._cpr.tc:.2f} (width {self._cpr.width_pct:.4f}%)")
             return
@@ -352,6 +460,7 @@ class CPRBreakoutStrategy(Strategy):
             self._stop_loss = self._cpr.tc
             self._target = candle.close - rr * sl_distance
             self._traded_today = True
+            self._trailing_peak = candle.close  # Initialize trough at entry
 
             self._emit_sell_signal(candle, f"CPR breakout SHORT — close {candle.close:.2f} < BC {self._cpr.bc:.2f} (width {self._cpr.width_pct:.4f}%)")
             return
@@ -433,6 +542,57 @@ class CPRBreakoutStrategy(Strategy):
         self._entry_price = 0.0
         self._stop_loss = 0.0
         self._target = 0.0
+        self._trailing_peak = 0.0
+
+    def _close_position_at_price(self, price: float, ts: datetime, reason: str) -> None:
+        """Emit a closing signal from a tick (no candle available) and reset position."""
+        symbol = self.get_param("trading_symbol", "")
+        exchange_str = self.get_param("exchange", "NSE")
+        quantity = self.get_param("quantity", 1)
+
+        if self._position == "LONG":
+            action = "SELL"
+            tx_type = TransactionType.SELL
+        elif self._position == "SHORT":
+            action = "BUY"
+            tx_type = TransactionType.BUY
+        else:
+            return
+
+        self._emit_signal(StrategySignal(
+            instrument_token=self.get_param("instrument_token", 0),
+            trading_symbol=symbol,
+            action=action,
+            reason=reason,
+            timestamp=ts,
+            metadata={
+                "cpr_pivot": self._cpr.pivot if self._cpr else 0,
+                "cpr_tc": self._cpr.tc if self._cpr else 0,
+                "cpr_bc": self._cpr.bc if self._cpr else 0,
+                "cpr_width_pct": self._cpr.width_pct if self._cpr else 0,
+                "exit_price": price,
+                "entry_price": self._entry_price,
+                "stop_loss": self._stop_loss,
+                "target": self._target,
+                "exit_source": "tick",
+            },
+            order_request=OrderRequest(
+                tradingsymbol=symbol,
+                exchange=Exchange(exchange_str),
+                transaction_type=tx_type,
+                order_type=OrderType.MARKET,
+                quantity=quantity,
+                product=ProductType.MIS,
+                variety=Variety.REGULAR,
+                validity=Validity.DAY,
+            ),
+        ))
+
+        self._position = None
+        self._entry_price = 0.0
+        self._stop_loss = 0.0
+        self._target = 0.0
+        self._trailing_peak = 0.0
 
     # ── Public accessors for scanner ────────────────────────────────────
 

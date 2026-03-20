@@ -32,7 +32,9 @@ import redis.asyncio as aioredis
 logger = logging.getLogger(__name__)
 
 _redis_client: aioredis.Redis | None = None
-_redis_unavailable: bool = False  # Set to True after first connection failure
+_redis_unavailable: bool = False  # Set to True after connection failure
+_redis_unavailable_since: float = 0.0  # When Redis became unavailable
+_REDIS_RETRY_INTERVAL: float = 60.0  # Retry connection every 60 seconds
 
 
 def _get_redis_url() -> str:
@@ -44,13 +46,23 @@ async def get_redis() -> aioredis.Redis | None:
     """
     Get the async Redis client singleton.
 
-    Returns None if Redis is unavailable (no retry until process restart
-    or explicit reset).
+    Returns None if Redis is unavailable. Automatically retries after
+    _REDIS_RETRY_INTERVAL seconds (default 60s) to recover from
+    transient failures without requiring a process restart.
     """
-    global _redis_client, _redis_unavailable
+    global _redis_client, _redis_unavailable, _redis_unavailable_since
 
     if _redis_unavailable:
-        return None
+        # Check if enough time has elapsed to retry
+        import time
+        elapsed = time.time() - _redis_unavailable_since
+        if elapsed < _REDIS_RETRY_INTERVAL:
+            return None
+        # Retry interval elapsed — reset and try again
+        logger.info("Redis retry interval elapsed (%.0fs), attempting reconnect...", elapsed)
+        _redis_unavailable = False
+        _redis_unavailable_since = 0.0
+        _redis_client = None
 
     if _redis_client is not None:
         return _redis_client
@@ -68,8 +80,10 @@ async def get_redis() -> aioredis.Redis | None:
         logger.info("Redis connected: %s", url)
         return _redis_client
     except Exception as e:
-        logger.warning("Redis unavailable (caching disabled): %s", e)
+        import time
+        logger.warning("Redis unavailable (caching disabled, retry in %.0fs): %s", _REDIS_RETRY_INTERVAL, e)
         _redis_unavailable = True
+        _redis_unavailable_since = time.time()
         _redis_client = None
         return None
 
@@ -139,6 +153,7 @@ async def close_redis() -> None:
 
 def reset_redis() -> None:
     """Reset the Redis state so next get_redis() attempts a fresh connection."""
-    global _redis_client, _redis_unavailable
+    global _redis_client, _redis_unavailable, _redis_unavailable_since
     _redis_client = None
     _redis_unavailable = False
+    _redis_unavailable_since = 0.0

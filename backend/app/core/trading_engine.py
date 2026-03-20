@@ -35,6 +35,7 @@ from app.providers.types import (
     TickData,
     TickMode,
 )
+from app.services.trade_journal import TradeJournal
 from app.strategies.base import StrategyState
 from app.strategies.cpr_breakout import CPRBreakoutStrategy, CPRLevels, calculate_cpr
 
@@ -204,10 +205,12 @@ class TradingEngine:
         provider: BrokerProvider,
         risk_manager: RiskManager,
         order_manager: OrderManager,
+        journal: TradeJournal | None = None,
     ):
         self._provider = provider
         self._risk = risk_manager
         self._order_mgr = order_manager
+        self._journal = journal
 
         # State
         self.state = EngineState.IDLE
@@ -217,6 +220,9 @@ class TradingEngine:
         self._ticker = None  # TickerConnection
         self._eod_task: asyncio.Task | None = None
         self._signal_task: asyncio.Task | None = None
+
+        # Journal: maps strategy_id → active trade_id for entry/exit tracking
+        self._active_trades: dict[str, str] = {}
 
         # WebSocket broadcast callbacks (set by deps.py to push to ConnectionManager)
         self._on_event_cb: Any = None       # async fn(event_dict) → broadcasts engine events
@@ -380,6 +386,31 @@ class TradingEngine:
                 logger.error("Error disconnecting ticker: %s", e)
             self._ticker = None
 
+        # Close any still-open journal trades (safety net for unprocessed exits)
+        if self._journal and self._active_trades:
+            for sid, trade_id in list(self._active_trades.items()):
+                try:
+                    strategy = next(
+                        (s for s in self._strategies.values() if s.strategy_id == sid),
+                        None,
+                    )
+                    # Use the strategy's last known entry price as fallback exit
+                    exit_price = strategy._entry_price if strategy and strategy._entry_price else 0.0
+                    trade = self._journal.record_exit(
+                        trade_id=trade_id,
+                        exit_price=exit_price,
+                        exit_reason="engine_stop",
+                    )
+                    if trade:
+                        self._session_pnl += trade.pnl
+                        logger.info(
+                            "Journal: closed orphan trade %s on engine stop, pnl=%.2f",
+                            trade_id, trade.pnl,
+                        )
+                except Exception as e:
+                    logger.error("Journal close orphan trade %s failed: %s", trade_id, e)
+            self._active_trades.clear()
+
         self.state = EngineState.STOPPED
         self._stopped_at = datetime.now()
         self._log_event("info", "Trading engine stopped", {
@@ -430,7 +461,7 @@ class TradingEngine:
             pass
 
     async def _process_ticks(self, ticks: list[TickData]) -> None:
-        """Process incoming ticks — build candles, feed to strategies, broadcast to WebSocket."""
+        """Process incoming ticks — feed to strategies for SL/target, build candles, broadcast to WebSocket."""
         if self.state not in (EngineState.RUNNING, EngineState.PAUSED):
             return
 
@@ -453,6 +484,15 @@ class TradingEngine:
             builder = self._candle_builders.get(token)
             if not builder:
                 continue
+
+            # Feed every tick to strategy for real-time SL/target/trailing SL
+            if self.state == EngineState.RUNNING:
+                strategy = self._strategies.get(token)
+                if strategy and strategy.state == StrategyState.RUNNING:
+                    try:
+                        await strategy.on_tick(tick)
+                    except Exception as e:
+                        logger.error("Strategy on_tick error (token=%d): %s", token, e)
 
             completed_candle = builder.on_tick(tick)
             if completed_candle is None:
@@ -514,6 +554,8 @@ class TradingEngine:
         OrderManager.process_signals() calls strategy.consume_signals()
         internally. We peek at strategy._signals first to avoid unnecessary
         calls, then log each result.
+
+        Also records entries/exits in the trade journal for performance tracking.
         """
         had_signals = False
 
@@ -527,8 +569,9 @@ class TradingEngine:
 
             had_signals = True
 
-            # Log signals before OrderManager consumes them
-            for signal in strategy._signals:
+            # Capture signal details before OrderManager consumes them
+            pending_signals = list(strategy._signals)
+            for signal in pending_signals:
                 self._total_signals += 1
                 self._log_event("signal", (
                     f"{signal.action} {signal.trading_symbol} — {signal.reason}"
@@ -541,7 +584,7 @@ class TradingEngine:
 
             try:
                 managed_orders = await self._order_mgr.process_signals(strategy)
-                for mo in managed_orders:
+                for i, mo in enumerate(managed_orders):
                     self._total_orders += 1
                     status = "placed" if mo.order_id else "rejected"
                     self._log_event("order", (
@@ -552,6 +595,11 @@ class TradingEngine:
                         "status": status,
                         "error": mo.error_message,
                     })
+
+                    # Record in journal if order was placed successfully
+                    if mo.order_id and self._journal:
+                        self._journal_record_order(mo, strategy)
+
             except Exception as e:
                 logger.error("Order processing error for %s: %s", strategy.strategy_id, e)
                 self._log_event("error", f"Order error: {e}", {
@@ -633,8 +681,10 @@ class TradingEngine:
                 "traded_today": strategy._traded_today,
             }
 
+        is_paper = getattr(self._provider, "is_paper", False)
         return {
             "state": self.state.value,
+            "is_paper": is_paper,
             "picks_count": len(self._picks),
             "strategies_count": len(self._strategies),
             "ticker_connected": self._ticker.is_connected() if self._ticker else False,
@@ -693,6 +743,114 @@ class TradingEngine:
         ]
 
     # ── Internal Helpers ─────────────────────────────────────────────────
+
+    def _journal_record_order(self, mo: Any, strategy: CPRBreakoutStrategy) -> None:
+        """
+        Record a successfully placed order in the trade journal.
+
+        Determines entry vs exit based on whether the strategy already has
+        an active trade in the journal:
+        - No active trade → this is an entry order → record_entry()
+        - Has active trade → this is an exit order → record_exit()
+        """
+        from app.core.order_manager import ManagedOrder
+
+        if not self._journal:
+            return
+
+        journal = self._journal  # local for type narrowing
+        sid = strategy.strategy_id
+        signal = mo.signal
+        metadata = signal.metadata or {}
+        is_paper = getattr(self._provider, "is_paper", False)
+
+        active_trade_id = self._active_trades.get(sid)
+
+        if active_trade_id is None:
+            # This is an ENTRY order
+            trade_id = f"trade_{sid}_{mo.order_id}"
+
+            # Determine direction from signal action
+            direction = "LONG" if signal.action == "BUY" else "SHORT"
+
+            # Get entry details from signal metadata
+            entry_price = metadata.get("entry_price", 0.0)
+            stop_loss = metadata.get("stop_loss", 0.0)
+            target = metadata.get("target", 0.0)
+
+            # Find the pick for exchange info
+            pick = next(
+                (p for p in self._picks if p.trading_symbol == signal.trading_symbol),
+                None,
+            )
+            exchange = pick.exchange if pick else "NSE"
+
+            try:
+                journal.record_entry(
+                    trade_id=trade_id,
+                    order_id=mo.order_id,
+                    strategy_id=sid,
+                    trading_symbol=signal.trading_symbol,
+                    exchange=exchange,
+                    direction=direction,
+                    entry_price=entry_price,
+                    quantity=mo.request.quantity,
+                    stop_loss=stop_loss,
+                    target=target,
+                    is_paper=is_paper,
+                    meta=metadata,
+                )
+                self._active_trades[sid] = trade_id
+                self._log_event("fill", (
+                    f"Journal entry: {direction} {signal.trading_symbol} "
+                    f"@ {entry_price:.2f} SL={stop_loss:.2f} T={target:.2f}"
+                ), {"trade_id": trade_id})
+            except Exception as e:
+                logger.error("Journal record_entry failed: %s", e)
+
+        else:
+            # This is an EXIT order
+            exit_price = metadata.get("exit_price", 0.0)
+            if not exit_price:
+                # Candle-based exit: entry_price in metadata is the closing candle price
+                # For exits, the signal metadata has entry_price = the strategy's entry price
+                # and the actual exit happens at market. Use stop_loss/target as proxy.
+                exit_price = metadata.get("stop_loss", 0.0) or metadata.get("target", 0.0)
+
+            # Determine exit reason from signal reason
+            exit_reason = "manual"
+            reason_lower = signal.reason.lower()
+            if "stop loss" in reason_lower or "sl hit" in reason_lower:
+                exit_reason = "stop_loss"
+            elif "target" in reason_lower:
+                exit_reason = "target"
+            elif "trailing" in reason_lower:
+                exit_reason = "trailing_sl"
+            elif "end of day" in reason_lower or "eod" in reason_lower or "auto-close" in reason_lower:
+                exit_reason = "eod_close"
+
+            try:
+                trade = journal.record_exit(
+                    trade_id=active_trade_id,
+                    exit_price=exit_price,
+                    exit_reason=exit_reason,
+                )
+                del self._active_trades[sid]
+
+                if trade:
+                    self._session_pnl += trade.pnl
+                    self._total_fills += 1
+                    pnl_str = f"+{trade.pnl:.2f}" if trade.pnl >= 0 else f"{trade.pnl:.2f}"
+                    self._log_event("exit", (
+                        f"Journal exit: {trade.trading_symbol} {exit_reason} "
+                        f"@ {exit_price:.2f} P&L={pnl_str}"
+                    ), {
+                        "trade_id": active_trade_id,
+                        "pnl": trade.pnl,
+                        "exit_reason": exit_reason,
+                    })
+            except Exception as e:
+                logger.error("Journal record_exit failed: %s", e)
 
     def _broadcast_status(self) -> None:
         """Push a status snapshot to all engine-subscribed WebSocket clients."""

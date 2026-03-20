@@ -203,16 +203,40 @@ _FALLBACK_CONSTITUENTS: dict[str, list[str]] = {
     ],
     "NIFTY PHARMA": ["SUNPHARMA"],
     "NIFTY AUTO": ["TATAMOTORS", "MARUTI"],
-    "NIFTY METAL": [],
-    "NIFTY ENERGY": ["RELIANCE"],
-    "NIFTY FMCG": ["ITC", "HINDUNILVR"],
-    "NIFTY REALTY": [],
-    "NIFTY INFRA": ["LT"],
-    "NIFTY PSU BANK": ["SBIN"],
-    "NIFTY MEDIA": [],
-    "NIFTY MIDCAP 50": [],
-    "NIFTY MIDCAP 100": [],
-    "NIFTY MID SELECT": [],
+    "NIFTY METAL": [
+        "TATASTEEL", "HINDALCO", "JSWSTEEL", "VEDL", "COALINDIA",
+        "NMDC", "SAIL", "NATIONALUM", "HINDCOPPER", "MOIL",
+    ],
+    "NIFTY ENERGY": ["RELIANCE", "ONGC", "NTPC", "POWERGRID", "BPCL", "IOC", "GAIL"],
+    "NIFTY FMCG": ["ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA", "GODREJCP",
+                    "DABUR", "MARICO", "COLPAL", "TATACONSUM"],
+    "NIFTY REALTY": [
+        "DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE", "PHOENIXLTD",
+        "SOBHA", "SUNTECK", "BRIGADE", "MAHLIFE",
+    ],
+    "NIFTY INFRA": ["LT", "NTPC", "POWERGRID", "ADANIPORTS", "ULTRACEMCO"],
+    "NIFTY PSU BANK": ["SBIN", "BANKBARODA", "PNB", "CANBK", "UNIONBANK",
+                        "INDIANB", "IDFCFIRSTB"],
+    "NIFTY MEDIA": [
+        "ZEEL", "PVR", "SUNTV", "NETWORK18", "TV18BRDCST",
+        "DISHTV", "HATHWAY", "NAZARA",
+    ],
+    "NIFTY MIDCAP 50": [
+        "MPHASIS", "VOLTAS", "AUROPHARMA", "IDFCFIRSTB", "FEDERALBNK",
+        "PAGEIND", "COFORGE", "MUTHOOTFIN", "LALPATHLAB", "CROMPTON",
+        "INDHOTEL", "PERSISTENT", "CUMMINSIND", "ASTRAL", "POLYCAB",
+    ],
+    "NIFTY MIDCAP 100": [
+        "MPHASIS", "VOLTAS", "AUROPHARMA", "FEDERALBNK", "PAGEIND",
+        "COFORGE", "MUTHOOTFIN", "LALPATHLAB", "CROMPTON", "INDHOTEL",
+        "PERSISTENT", "CUMMINSIND", "ASTRAL", "POLYCAB", "ESCORTS",
+        "ATUL", "JUBLFOOD", "LINDEINDIA", "KANSAINER", "SYNGENE",
+    ],
+    "NIFTY MID SELECT": [
+        "MPHASIS", "VOLTAS", "AUROPHARMA", "FEDERALBNK", "PAGEIND",
+        "COFORGE", "MUTHOOTFIN", "LALPATHLAB", "CROMPTON", "INDHOTEL",
+        "PERSISTENT", "CUMMINSIND", "ASTRAL", "POLYCAB", "ESCORTS",
+    ],
 }
 
 
@@ -301,6 +325,51 @@ async def get_nse_cache_status():
     """Return the current state of the NSE index data cache."""
     nse = _get_nse_service()
     return nse.get_cache_status()
+
+
+@router.post("/cpr-scan/refresh")
+async def refresh_nse_index_data():
+    """
+    Force-refresh all NSE index constituent data.
+
+    Clears both in-memory and Redis caches, then fetches fresh data from
+    NSE for all 16 indices. Use this when the index list shows stale or
+    incomplete data (e.g., after NSE rate-limiting caused partial failures).
+
+    Returns:
+        Fresh index data with constituent counts and fetch status per index.
+    """
+    nse = _get_nse_service()
+
+    # Clear all caches
+    redis_deleted = await nse.clear_all_cache()
+    logger.info("Force-refresh: cleared caches (%d Redis keys deleted)", redis_deleted)
+
+    # Fetch fresh data for all indices
+    try:
+        all_data = await nse.get_all_constituents(force_refresh=True)
+    except Exception as e:
+        logger.error("Force-refresh failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"NSE fetch failed: {e}")
+
+    succeeded = {
+        name: {
+            "constituent_count": data.constituent_count,
+            "last_price": data.last_price,
+        }
+        for name, data in all_data.items()
+    }
+
+    failed = [name for name in AVAILABLE_INDICES if name not in all_data]
+
+    return {
+        "status": "refreshed",
+        "redis_keys_cleared": redis_deleted,
+        "indices_fetched": len(succeeded),
+        "indices_failed": len(failed),
+        "succeeded": succeeded,
+        "failed": failed,
+    }
 
 
 @router.post("/cpr-scan")

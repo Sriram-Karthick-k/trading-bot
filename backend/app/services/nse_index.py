@@ -21,7 +21,7 @@ from urllib.parse import quote
 
 import httpx
 
-from app.services.redis_client import redis_get, redis_set
+from app.services.redis_client import redis_get, redis_set, redis_delete
 
 logger = logging.getLogger(__name__)
 
@@ -230,11 +230,16 @@ class NSEIndexService:
     REDIS_PREFIX = "nse:index:"
     REDIS_TTL = 86400  # 24 hours
 
+    # Retry configuration
+    MAX_RETRIES = 3
+    RETRY_BASE_DELAY = 2.0  # seconds — doubles each attempt (2, 4, 8)
+    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
     def __init__(
         self,
         cache_ttl_seconds: int = 300,  # 5 minutes default (in-memory)
         request_timeout: float = 30.0,
-        rate_limit_delay: float = 1.0,  # seconds between API calls
+        rate_limit_delay: float = 2.0,  # seconds between API calls (was 1.0)
     ):
         self._cache_ttl = cache_ttl_seconds
         self._timeout = request_timeout
@@ -244,6 +249,7 @@ class NSEIndexService:
         self._session_established: bool = False
         self._session_time: float = 0.0
         self._last_request_time: float = 0.0
+        self._consecutive_failures: int = 0
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client with session cookies."""
@@ -282,12 +288,127 @@ class NSEIndexService:
             raise NSEIndexError(f"Failed to establish NSE session: {e}")
 
     async def _rate_limit(self) -> None:
-        """Enforce rate limiting between API calls."""
+        """Enforce rate limiting between API calls.
+
+        Uses adaptive delay: increases delay after consecutive failures
+        to avoid hammering NSE when it's rate-limiting us.
+        """
         now = time.time()
+        # Adaptive delay: base delay + extra based on consecutive failures
+        effective_delay = self._rate_limit_delay + (self._consecutive_failures * 1.0)
         elapsed = now - self._last_request_time
-        if elapsed < self._rate_limit_delay:
-            await asyncio.sleep(self._rate_limit_delay - elapsed)
+        if elapsed < effective_delay:
+            await asyncio.sleep(effective_delay - elapsed)
         self._last_request_time = time.time()
+
+    async def _fetch_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        url_name: str,
+        index_name: str,
+    ) -> dict[str, Any]:
+        """Fetch from NSE API with retry and exponential backoff.
+
+        Handles:
+        - 401/403: Session expired → re-establish and retry
+        - 429: Rate limited → respect Retry-After header or backoff
+        - 5xx: Server error → exponential backoff retry
+        - Timeouts/network errors → exponential backoff retry
+        """
+        last_error: Exception | None = None
+
+        for attempt in range(self.MAX_RETRIES):
+            await self._rate_limit()
+
+            try:
+                resp = await client.get(
+                    NSE_API_URL,
+                    params={"index": url_name},
+                )
+
+                # Session expired — re-establish and retry (don't count as a retry attempt)
+                if resp.status_code in (401, 403):
+                    logger.info(
+                        "NSE session expired (HTTP %d) for %s, re-establishing...",
+                        resp.status_code, index_name,
+                    )
+                    await self._establish_session()
+                    await self._rate_limit()
+                    resp = await client.get(
+                        NSE_API_URL,
+                        params={"index": url_name},
+                    )
+
+                # Rate limited — respect Retry-After or use backoff
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait_time = min(float(retry_after), 30.0)
+                        except (ValueError, TypeError):
+                            wait_time = self.RETRY_BASE_DELAY * (2 ** attempt)
+                    else:
+                        wait_time = self.RETRY_BASE_DELAY * (2 ** attempt)
+
+                    self._consecutive_failures += 1
+                    logger.warning(
+                        "NSE rate-limited (429) for %s, waiting %.1fs (attempt %d/%d)",
+                        index_name, wait_time, attempt + 1, self.MAX_RETRIES,
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+
+                # Server error — exponential backoff
+                if resp.status_code in self.RETRYABLE_STATUS_CODES:
+                    wait_time = self.RETRY_BASE_DELAY * (2 ** attempt)
+                    self._consecutive_failures += 1
+                    logger.warning(
+                        "NSE returned %d for %s, retrying in %.1fs (attempt %d/%d)",
+                        resp.status_code, index_name, wait_time,
+                        attempt + 1, self.MAX_RETRIES,
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+
+                resp.raise_for_status()
+                self._consecutive_failures = max(0, self._consecutive_failures - 1)
+                return resp.json()
+
+            except httpx.TimeoutException as e:
+                wait_time = self.RETRY_BASE_DELAY * (2 ** attempt)
+                self._consecutive_failures += 1
+                logger.warning(
+                    "NSE request timeout for %s, retrying in %.1fs (attempt %d/%d): %s",
+                    index_name, wait_time, attempt + 1, self.MAX_RETRIES, e,
+                )
+                last_error = e
+                await asyncio.sleep(wait_time)
+                continue
+
+            except httpx.HTTPStatusError as e:
+                # Non-retryable HTTP error
+                raise NSEIndexError(
+                    f"NSE API returned {e.response.status_code} for {index_name}",
+                    index_name=index_name,
+                    status_code=e.response.status_code,
+                )
+
+            except httpx.HTTPError as e:
+                wait_time = self.RETRY_BASE_DELAY * (2 ** attempt)
+                self._consecutive_failures += 1
+                logger.warning(
+                    "NSE request failed for %s, retrying in %.1fs (attempt %d/%d): %s",
+                    index_name, wait_time, attempt + 1, self.MAX_RETRIES, e,
+                )
+                last_error = e
+                await asyncio.sleep(wait_time)
+                continue
+
+        # All retries exhausted
+        raise NSEIndexError(
+            f"NSE API failed after {self.MAX_RETRIES} retries for {index_name}: {last_error}",
+            index_name=index_name,
+        )
 
     def _parse_constituents(self, data: dict[str, Any]) -> IndexData:
         """Parse NSE API response into IndexData."""
@@ -388,41 +509,11 @@ class NSEIndexService:
                 except (KeyError, TypeError, ValueError) as e:
                     logger.warning("Redis data corrupt for %s, fetching fresh: %s", index_name, e)
 
-        # Fetch from NSE
+        # Fetch from NSE with retry
         url_name = INDEX_URL_NAMES[index_name]
         client = await self._get_client()
-        await self._rate_limit()
 
-        try:
-            resp = await client.get(
-                NSE_API_URL,
-                params={"index": url_name},
-            )
-
-            if resp.status_code == 401 or resp.status_code == 403:
-                # Session expired, re-establish and retry
-                logger.info("NSE session expired, re-establishing...")
-                await self._establish_session()
-                await self._rate_limit()
-                resp = await client.get(
-                    NSE_API_URL,
-                    params={"index": url_name},
-                )
-
-            resp.raise_for_status()
-            data = resp.json()
-
-        except httpx.HTTPStatusError as e:
-            raise NSEIndexError(
-                f"NSE API returned {e.response.status_code} for {index_name}",
-                index_name=index_name,
-                status_code=e.response.status_code,
-            )
-        except httpx.HTTPError as e:
-            raise NSEIndexError(
-                f"NSE API request failed for {index_name}: {e}",
-                index_name=index_name,
-            )
+        data = await self._fetch_with_retry(client, url_name, index_name)
 
         result = self._parse_constituents(data)
         self._cache[index_name] = result
@@ -446,6 +537,8 @@ class NSEIndexService:
         Fetch constituents for multiple indices (defaults to all 16).
 
         Fetches sequentially to respect NSE rate limits.
+        If 3+ consecutive indices fail, assumes NSE is blocking and stops early
+        to avoid wasting time on further requests.
 
         Returns:
             Dict mapping index name → IndexData
@@ -453,18 +546,40 @@ class NSEIndexService:
         target_indices = indices or AVAILABLE_INDICES
         results: dict[str, IndexData] = {}
         errors: list[str] = []
+        consecutive_errors = 0
+        max_consecutive_errors = 3
 
         for idx_name in target_indices:
             try:
                 results[idx_name] = await self.get_constituents(
                     idx_name, force_refresh=force_refresh
                 )
+                consecutive_errors = 0  # Reset on success
             except NSEIndexError as e:
                 logger.warning("Failed to fetch %s: %s", idx_name, e)
                 errors.append(f"{idx_name}: {e}")
+                consecutive_errors += 1
+
+                if consecutive_errors >= max_consecutive_errors:
+                    remaining = [
+                        n for n in target_indices
+                        if n not in results and f"{n}:" not in " ".join(errors)
+                    ]
+                    if remaining:
+                        logger.error(
+                            "Stopping batch fetch after %d consecutive failures. "
+                            "Remaining %d indices skipped: %s",
+                            max_consecutive_errors, len(remaining), remaining,
+                        )
+                        for r in remaining:
+                            errors.append(f"{r}: skipped (batch aborted after consecutive failures)")
+                    break
 
         if errors:
-            logger.warning("Some indices failed: %s", errors)
+            logger.warning(
+                "Index fetch: %d succeeded, %d failed: %s",
+                len(results), len(errors), errors,
+            )
 
         return results
 
@@ -496,9 +611,28 @@ class NSEIndexService:
         return {name: data.symbols for name, data in all_data.items()}
 
     def clear_cache(self) -> None:
-        """Clear all cached data."""
+        """Clear in-memory cached data."""
         self._cache.clear()
-        logger.debug("NSE index cache cleared")
+        self._consecutive_failures = 0
+        logger.debug("NSE index in-memory cache cleared")
+
+    async def clear_all_cache(self) -> int:
+        """Clear both in-memory AND Redis cached index data.
+
+        Returns the number of Redis keys deleted.
+        """
+        self._cache.clear()
+        self._consecutive_failures = 0
+
+        # Clear Redis keys for all known indices
+        deleted = 0
+        for index_name in AVAILABLE_INDICES:
+            redis_key = f"{self.REDIS_PREFIX}{index_name}"
+            if await redis_delete(redis_key):
+                deleted += 1
+
+        logger.info("NSE index cache cleared: memory + %d Redis keys", deleted)
+        return deleted
 
     def get_cache_status(self) -> dict[str, Any]:
         """Return cache status for monitoring."""
