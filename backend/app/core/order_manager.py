@@ -14,6 +14,7 @@ from typing import Any
 from app.core.risk_manager import RiskManager
 from app.providers.base import BrokerProvider, OrderError
 from app.providers.types import Order, OrderRequest, OrderResponse, OrderStatus
+from app.services.decision_log import decision_log
 from app.strategies.base import Strategy, StrategySignal
 
 logger = logging.getLogger(__name__)
@@ -70,10 +71,19 @@ class OrderManager:
         request = signal.order_request
         assert request is not None
 
+        decision_log.log("order_manager", "info", "Processing signal", {
+            "strategy_id": strategy_id,
+            "action": signal.action,
+            "symbol": signal.trading_symbol,
+            "reason": signal.reason,
+        })
+
         # Get current price for risk check
+        # Use "EXCHANGE:SYMBOL" format for get_ltp() — matches provider expectations
         try:
-            ltp_data = await self._provider.get_ltp([signal.trading_symbol])
-            ltp_value = ltp_data.get(signal.trading_symbol)
+            ltp_key = f"{request.exchange.value}:{request.tradingsymbol}"
+            ltp_data = await self._provider.get_ltp([ltp_key])
+            ltp_value = ltp_data.get(ltp_key)
             if ltp_value is not None:
                 # get_ltp may return LTPQuote objects or raw floats
                 price = float(ltp_value.last_price if hasattr(ltp_value, "last_price") else ltp_value)
@@ -81,8 +91,15 @@ class OrderManager:
                 price = 0.0
             if request.price and request.price > 0:
                 price = request.price
-        except Exception:
+
+            decision_log.log("order_manager", "debug", "LTP fetched", {
+                "ltp_key": ltp_key, "price": price,
+            })
+        except Exception as e:
             price = request.price or 0.0
+            decision_log.log("order_manager", "warn", "LTP fetch failed, using fallback", {
+                "error": str(e), "fallback_price": price,
+            })
 
         # Risk check
         open_orders = sum(
@@ -97,6 +114,14 @@ class OrderManager:
         risk_result = self._risk.check_order(request, price, open_orders, open_positions)
 
         if not risk_result.passed:
+            decision_log.log("order_manager", "warn", "Risk check FAILED", {
+                "strategy_id": strategy_id,
+                "symbol": signal.trading_symbol,
+                "reason": risk_result.reason,
+                "price": price,
+                "open_orders": open_orders,
+                "open_positions": open_positions,
+            })
             managed = ManagedOrder(
                 order_id="",
                 strategy_id=strategy_id,
@@ -128,6 +153,14 @@ class OrderManager:
             self._orders[order_id] = managed
             self._strategy_orders.setdefault(strategy_id, []).append(order_id)
 
+            decision_log.log("order_manager", "info", "Order placed successfully", {
+                "order_id": order_id,
+                "strategy_id": strategy_id,
+                "symbol": signal.trading_symbol,
+                "action": signal.action,
+                "quantity": request.quantity,
+                "price": price,
+            })
             logger.info(
                 "Order placed: id=%s strategy=%s symbol=%s action=%s qty=%d",
                 order_id, strategy_id, signal.trading_symbol,
@@ -136,6 +169,11 @@ class OrderManager:
             return managed
 
         except OrderError as e:
+            decision_log.log("order_manager", "error", "Order placement failed", {
+                "strategy_id": strategy_id,
+                "symbol": signal.trading_symbol,
+                "error": str(e),
+            })
             managed = ManagedOrder(
                 order_id="",
                 strategy_id=strategy_id,

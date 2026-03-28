@@ -439,6 +439,9 @@ async def setup_long_position(
     assert signals[0].action == "BUY"
     assert strategy._position == "LONG"
 
+    # Simulate order confirmation so tick-level SL/target checks are active
+    strategy._order_confirmed = True
+
 
 async def setup_short_position(
     strategy: CPRBreakoutStrategy, token: int = 256265
@@ -463,6 +466,9 @@ async def setup_short_position(
     assert len(signals) == 1
     assert signals[0].action == "SELL"
     assert strategy._position == "SHORT"
+
+    # Simulate order confirmation so tick-level SL/target checks are active
+    strategy._order_confirmed = True
 
 
 # ── Tick-level SL/target exit tests ────────────────────────────────────────

@@ -31,6 +31,8 @@ interface UseEngineStreamOptions {
   enabled?: boolean;
   /** Max events to keep in buffer. Defaults to 100. */
   maxEvents?: number;
+  /** Callback for tick data — receives {instrument_token, last_price, volume, timestamp}. */
+  onTick?: (tick: { instrument_token: number; last_price: number; volume?: number; timestamp?: string }) => void;
 }
 
 interface UseEngineStreamReturn {
@@ -42,6 +44,8 @@ interface UseEngineStreamReturn {
   events: EngineEvent[];
   /** Manually clear the event buffer. */
   clearEvents: () => void;
+  /** Subscribe to tick data for specific instrument tokens. */
+  subscribeTokens: (tokens: number[]) => void;
 }
 
 /**
@@ -56,18 +60,24 @@ const WS_TO_SWR_KEY: Record<string, string> = {
 export function useEngineStream(
   options: UseEngineStreamOptions = {},
 ): UseEngineStreamReturn {
-  const { enabled = true, maxEvents = MAX_EVENTS } = options;
+  const { enabled = true, maxEvents = MAX_EVENTS, onTick } = options;
 
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
+  const onTickRef = useRef(onTick);
 
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState<EngineStatus | null>(null);
   const [events, setEvents] = useState<EngineEvent[]>([]);
 
   const clearEvents = useCallback(() => setEvents([]), []);
+
+  // Keep onTick ref fresh without causing reconnects
+  useEffect(() => {
+    onTickRef.current = onTick;
+  }, [onTick]);
 
   // Stable client ID for this tab session
   const clientId = useMemo(
@@ -98,7 +108,17 @@ export function useEngineStream(
     // Clean up any existing connection
     cleanup();
 
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "wss://localhost:8000";
+    // Auto-detect WebSocket protocol from page protocol
+    const envWsUrl = process.env.NEXT_PUBLIC_WS_URL;
+    let wsUrl: string;
+    if (envWsUrl) {
+      wsUrl = envWsUrl;
+    } else if (typeof window !== "undefined") {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      wsUrl = `${proto}//localhost:8000`;
+    } else {
+      wsUrl = "ws://localhost:8000";
+    }
     const ws = new WebSocket(`${wsUrl}/api/ws/ticks/${clientId}`);
 
     ws.onopen = () => {
@@ -156,7 +176,15 @@ export function useEngineStream(
           }
 
           case "tick":
-            // Tick data — ignore in this hook (handled by useTickStream)
+            // Forward tick data to the onTick callback for live price updates
+            if (onTickRef.current && data.instrument_token) {
+              onTickRef.current({
+                instrument_token: data.instrument_token,
+                last_price: data.last_price,
+                volume: data.volume,
+                timestamp: data.timestamp,
+              });
+            }
             break;
 
           case "pong":
@@ -169,6 +197,20 @@ export function useEngineStream(
             if (swrKey && data.data !== undefined) {
               // Inject received data into SWR cache without revalidation
               mutate(swrKey, data.data, false);
+            }
+
+            // Decision log entries get added to the events buffer for the log viewer
+            if (data.type === "decision_log" && data.data) {
+              const logEntry: EngineEvent = {
+                timestamp: data.data.timestamp || new Date().toISOString(),
+                type: `log:${data.data.component || "system"}`,
+                message: data.data.message || "",
+                data: data.data,
+              };
+              setEvents((prev) => {
+                const next = [...prev, logEntry];
+                return next.length > maxEvents ? next.slice(-maxEvents) : next;
+              });
             }
             break;
           }
@@ -208,5 +250,11 @@ export function useEngineStream(
     };
   }, [connect, cleanup]);
 
-  return { connected, status, events, clearEvents };
+  const subscribeTokens = useCallback((tokens: number[]) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN && tokens.length > 0) {
+      wsRef.current.send(JSON.stringify({ action: "subscribe", tokens }));
+    }
+  }, []);
+
+  return { connected, status, events, clearEvents, subscribeTokens };
 }

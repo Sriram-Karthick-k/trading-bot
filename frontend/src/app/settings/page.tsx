@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRiskLimits, useRiskStatus, useTradingMode, useTradingModeStatus } from "@/hooks/useData";
+import { useRiskLimits, useRiskStatus, useTradingMode, useTradingModeStatus, usePaperSettings } from "@/hooks/useData";
 import { config as configApi } from "@/lib/api";
 import { cn, formatCurrency } from "@/lib/utils";
 import type { TradingMode } from "@/types";
@@ -15,6 +15,7 @@ export default function SettingsPage() {
       </header>
 
       <TradingModePanel />
+      <PaperSettingsPanel />
       <KillSwitchPanel />
       <RiskLimitsPanel />
     </div>
@@ -177,6 +178,112 @@ function TradingModePanel() {
       {switching && (
         <p className="text-xs text-[var(--muted)] mt-3">Switching mode...</p>
       )}
+    </div>
+  );
+}
+
+function PaperSettingsPanel() {
+  const { data: modeData } = useTradingMode();
+  const { data: settings, mutate } = usePaperSettings();
+  const [form, setForm] = useState({
+    initial_capital: 1000000,
+    slippage_pct: 0.05,
+    brokerage_per_order: 20,
+  });
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const isPaper = modeData?.mode === "paper";
+
+  useEffect(() => {
+    if (settings) {
+      setForm({
+        initial_capital: settings.initial_capital,
+        slippage_pct: settings.slippage_pct,
+        brokerage_per_order: settings.brokerage_per_order,
+      });
+    }
+  }, [settings]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await configApi.updatePaperSettings(form);
+      mutate();
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to save";
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-5">
+        <div>
+          <h3 className="font-semibold text-lg">Paper Trading Settings</h3>
+          <p className="text-sm text-[var(--muted)] mt-1">
+            Configure simulated capital, slippage, and brokerage for paper trading.
+            {isPaper && " Changes apply after next mode switch or restart."}
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <label className="text-xs text-[var(--muted)] block mb-1">Initial Capital</label>
+          <input
+            className="input w-full"
+            type="number"
+            min={1000}
+            step={10000}
+            value={form.initial_capital}
+            onChange={(e) => setForm({ ...form, initial_capital: Number(e.target.value) })}
+          />
+        </div>
+        <div>
+          <label className="text-xs text-[var(--muted)] block mb-1">Slippage %</label>
+          <input
+            className="input w-full"
+            type="number"
+            min={0}
+            max={5}
+            step={0.01}
+            value={form.slippage_pct}
+            onChange={(e) => setForm({ ...form, slippage_pct: Number(e.target.value) })}
+          />
+        </div>
+        <div>
+          <label className="text-xs text-[var(--muted)] block mb-1">Brokerage/Order</label>
+          <input
+            className="input w-full"
+            type="number"
+            min={0}
+            step={5}
+            value={form.brokerage_per_order}
+            onChange={(e) => setForm({ ...form, brokerage_per_order: Number(e.target.value) })}
+          />
+        </div>
+      </div>
+
+      {error && (
+        <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 mt-4">
+          {error}
+        </div>
+      )}
+
+      <div className="mt-5 flex items-center gap-3">
+        <button className="btn-primary" onClick={handleSave} disabled={saving}>
+          {saving ? "Saving..." : "Save Paper Settings"}
+        </button>
+        {saved && <span className="text-sm text-emerald-400">Saved</span>}
+      </div>
     </div>
   );
 }

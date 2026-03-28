@@ -5,7 +5,7 @@ Dependency injection for FastAPI routes.
 from __future__ import annotations
 
 import logging
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends
 
@@ -17,6 +17,7 @@ from app.core.trading_engine import TradingEngine
 from app.providers.base import BrokerProvider
 from app.providers.registry import get_active_provider
 from app.services.trade_journal import TradeJournal
+from app.services.decision_log import decision_log
 from app.api.routes.ws import manager as ws_manager
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,13 @@ _journal: TradeJournal | None = None
 # Current trading mode ("live" or "paper")
 _trading_mode: str = "live"
 _paper_provider: BrokerProvider | None = None
+# Paper trading settings loaded from DB (populated during startup)
+_paper_settings_cache: dict[str, float] = {}
+
+
+def update_paper_settings_cache(settings: dict[str, float]) -> None:
+    """Update the in-memory paper settings cache (called from startup or settings API)."""
+    _paper_settings_cache.update(settings)
 
 
 def get_config_manager() -> ConfigManager:
@@ -115,10 +123,10 @@ def get_provider() -> BrokerProvider:
     if _trading_mode == "paper":
         if _paper_provider is None:
             from app.providers.paper.provider import PaperTradingProvider
-            config = get_config_manager()
-            capital = config.get("mock.default_capital", float, default=1_000_000.0)
-            slippage = config.get("mock.default_slippage_pct", float, default=0.05)
-            brokerage = config.get("mock.brokerage_per_order", float, default=20.0)
+            # Load paper settings from DB (populated by _paper_settings_cache on startup)
+            capital = _paper_settings_cache.get("initial_capital", 1_000_000.0)
+            slippage = _paper_settings_cache.get("slippage_pct", 0.05)
+            brokerage = _paper_settings_cache.get("brokerage_per_order", 20.0)
             _paper_provider = PaperTradingProvider(
                 real_provider=real_provider,
                 initial_capital=capital,
@@ -144,11 +152,54 @@ def get_risk_manager() -> RiskManager:
 def get_order_manager() -> OrderManager:
     global _order_manager
     if _order_manager is None:
+        provider = get_provider()
         _order_manager = OrderManager(
-            provider=get_provider(),
+            provider=provider,
             risk_manager=get_risk_manager(),
         )
+
+        # Wire paper order callback so ManagedOrder status updates on fill
+        if _trading_mode == "paper" and hasattr(provider, "order_book"):
+            _wire_paper_order_callback(provider, _order_manager)
+
     return _order_manager
+
+
+def _wire_paper_order_callback(
+    paper_provider: BrokerProvider, order_manager: OrderManager
+) -> None:
+    """
+    Connect PaperOrderBook's synchronous on_order_update callback
+    to the async OrderManager.on_order_update().
+
+    PaperOrderBook.place_order() fires the callback synchronously.
+    We schedule the async handler on the running event loop.
+    """
+    import asyncio
+
+    def _sync_order_update(order: Any) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.call_soon_threadsafe(
+                asyncio.ensure_future,
+                order_manager.on_order_update(order),
+            )
+        except RuntimeError:
+            # No running loop — try get_event_loop (may work during startup)
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.call_soon_threadsafe(
+                        asyncio.ensure_future,
+                        order_manager.on_order_update(order),
+                    )
+                else:
+                    loop.run_until_complete(order_manager.on_order_update(order))
+            except Exception:
+                logger.warning("Could not deliver paper order update: %s", getattr(order, 'order_id', '?'))
+
+    paper_provider.order_book._on_order_update = _sync_order_update  # type: ignore[union-attr]
+    logger.info("Wired paper order callback to OrderManager")
 
 
 def get_strategies() -> dict:
@@ -178,6 +229,12 @@ def get_trading_engine() -> TradingEngine:
         _trading_engine._on_tick_cb = ws_manager.broadcast_tick
         _trading_engine._on_status_cb = ws_manager.broadcast_engine_status
         _trading_engine._on_data_cb = ws_manager.broadcast_data
+
+        # Wire decision log broadcast so new entries push to WS clients
+        async def _broadcast_decision_log_entry(entry: dict) -> None:
+            await ws_manager.broadcast_data("decision_log", entry)
+
+        decision_log.set_broadcast_callback(_broadcast_decision_log_entry)
     return _trading_engine
 
 

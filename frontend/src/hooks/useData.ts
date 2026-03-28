@@ -26,6 +26,8 @@ import type {
   EngineEvent,
   TradingModeResponse,
   TradingModeStatus,
+  PaperSettings,
+  DecisionLogResponse,
   JournalTradesResponse,
   DailyPnL,
   PerformanceSummary,
@@ -138,6 +140,24 @@ export function useTradingModeStatus() {
   return useSWR<TradingModeStatus>(
     "trading-mode-status",
     () => fetcher(config.getTradingModeStatus),
+    { refreshInterval: 5000 },
+  );
+}
+
+/** Paper trading settings (capital, slippage, brokerage). */
+export function usePaperSettings() {
+  return useSWR<PaperSettings>(
+    "paper-settings",
+    () => fetcher(config.getPaperSettings),
+  );
+}
+
+/** Decision logs — polls every 5s as fallback (WS-backed). */
+export function useDecisionLogs(params?: { component?: string; level?: string; limit?: number }) {
+  const key = `decision-logs-${JSON.stringify(params ?? {})}`;
+  return useSWR<DecisionLogResponse>(
+    key,
+    () => fetcher(() => engine.getLogs(params)),
     { refreshInterval: 5000 },
   );
 }

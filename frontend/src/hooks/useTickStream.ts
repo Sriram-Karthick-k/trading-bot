@@ -25,7 +25,17 @@ export function useTickStream({ clientId, tokens, onTick, enabled = true }: UseT
   const connect = useCallback(() => {
     if (!enabled) return;
 
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "wss://localhost:8000";
+    // Auto-detect WebSocket protocol from page protocol
+    const envWsUrl = process.env.NEXT_PUBLIC_WS_URL;
+    let wsUrl: string;
+    if (envWsUrl) {
+      wsUrl = envWsUrl;
+    } else if (typeof window !== "undefined") {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      wsUrl = `${proto}//localhost:8000`;
+    } else {
+      wsUrl = "ws://localhost:8000";
+    }
     const ws = new WebSocket(`${wsUrl}/api/ws/ticks/${clientId}`);
 
     ws.onopen = () => {

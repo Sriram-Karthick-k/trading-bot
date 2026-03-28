@@ -46,18 +46,45 @@ async def lifespan(app: FastAPI):
     discover_providers()
     logger.info("Providers discovered")
 
-    # Restore trading mode from config/DB
+    # Restore trading mode from DB (persisted across restarts)
     try:
-        from app.api.deps import get_config_manager, set_trading_mode
-        config_mgr = get_config_manager()
-        saved_mode = config_mgr.get("trading.mode", str, default="live")
+        from app.api.routes.config import load_trading_mode_from_db
+        from app.api.deps import set_trading_mode
+        saved_mode = await load_trading_mode_from_db()
         if saved_mode == "paper":
             set_trading_mode("paper")
             logger.info("Restored trading mode: paper")
         else:
-            logger.info("Trading mode: live")
+            logger.info("Trading mode: live (default)")
     except Exception as e:
         logger.warning("Failed to restore trading mode: %s", e)
+
+    # Restore paper trading settings from DB
+    try:
+        from app.api.routes.config import load_paper_settings_from_db
+        from app.api.deps import update_paper_settings_cache
+        saved_paper = await load_paper_settings_from_db()
+        if saved_paper:
+            update_paper_settings_cache(saved_paper)
+            logger.info("Restored paper settings from DB: %s", saved_paper)
+        else:
+            logger.info("No persisted paper settings found, using defaults")
+    except Exception as e:
+        logger.warning("Failed to restore paper settings: %s", e)
+
+    # Restore persisted risk limits from DB
+    try:
+        from app.api.routes.config import load_risk_limits_from_db
+        from app.api.deps import get_risk_manager
+        saved_limits = await load_risk_limits_from_db()
+        if saved_limits is not None:
+            risk_mgr = get_risk_manager()
+            risk_mgr.update_limits(saved_limits)
+            logger.info("Restored risk limits from DB")
+        else:
+            logger.info("No persisted risk limits found, using defaults")
+    except Exception as e:
+        logger.warning("Failed to restore risk limits: %s", e)
 
     # Restore saved session for Zerodha provider
     try:

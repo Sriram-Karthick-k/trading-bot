@@ -217,6 +217,12 @@ export interface TradingModeStatus {
   paper_status: PaperStatus | null;
 }
 
+export interface PaperSettings {
+  initial_capital: number;
+  slippage_pct: number;
+  brokerage_per_order: number;
+}
+
 // ── Engine Types ────────────────────────────────────────────
 
 export type EngineState =
@@ -295,6 +301,22 @@ export interface EnginePick {
     width: number;
     width_pct: number;
   };
+}
+
+// ── Decision Log Types ─────────────────────────────────────────
+
+export interface DecisionLogEntry {
+  timestamp: string;
+  component: string;  // "strategy", "risk", "order_manager", "engine"
+  level: string;      // "debug", "info", "warn", "error"
+  message: string;
+  data: Record<string, unknown>;
+}
+
+export interface DecisionLogResponse {
+  entries: DecisionLogEntry[];
+  total_buffered: number;
+  count: number;
 }
 
 // ── Trade Journal Types ────────────────────────────────────

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   useOrders,
   usePositions,
@@ -9,10 +9,9 @@ import {
   useEngineStatus,
   useEngineEvents,
   useTradingMode,
-  useSessionSummary,
   useJournalTrades,
   usePerformance,
-  useTodayPnl,
+  useDecisionLogs,
 } from "@/hooks/useData";
 import { useEngineStream } from "@/hooks/useEngineStream";
 import {
@@ -29,8 +28,8 @@ import type { EngineEvent, EngineStrategyDetail, JournalTrade } from "@/types";
 import { formatCurrency, formatPnl, formatNumber, cn } from "@/lib/utils";
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   CPR TRADING COMMAND CENTER
-   Everything you need for intraday CPR breakout trading — one page.
+   CPR TRADING DESK — Simplified Single-Page Layout
+   Flow: Header → Scanner → Engine (+ positions/orders) → Trade Journal
    ═══════════════════════════════════════════════════════════════════════════ */
 
 export default function TradingCommandCenter() {
@@ -40,7 +39,6 @@ export default function TradingCommandCenter() {
   } | null>(null);
   const { data: tradingMode } = useTradingMode();
 
-  // Handle Zerodha redirect auth result
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const authSuccess = params.get("auth");
@@ -59,7 +57,7 @@ export default function TradingCommandCenter() {
   const isPaper = tradingMode?.is_paper ?? false;
 
   return (
-    <div className="p-6 lg:p-8 space-y-6 max-w-[1800px] mx-auto">
+    <div className="p-6 lg:p-8 space-y-5 max-w-[1800px] mx-auto">
       {/* Paper trading banner */}
       {isPaper && (
         <div className="bg-amber-500/10 border-2 border-amber-500/30 rounded-lg px-4 py-2.5 flex items-center justify-between">
@@ -73,6 +71,7 @@ export default function TradingCommandCenter() {
           </a>
         </div>
       )}
+
       {/* Auth notification */}
       {authMsg && (
         <div
@@ -95,44 +94,32 @@ export default function TradingCommandCenter() {
         </div>
       )}
 
-      {/* ── Section 1: Status Bar ────────────────────────────── */}
-      <StatusBar />
+      {/* ── Compact Header ────────────────────────────────────── */}
+      <CompactHeader />
 
-      {/* ── Section 2: CPR Scanner (compact) ─────────────────── */}
+      {/* ── CPR Scanner ───────────────────────────────────────── */}
       <CPRScannerSection />
 
-      {/* ── Section 3: Engine Control ────────────────────────── */}
+      {/* ── Engine + Positions + Orders ────────────────────────── */}
       <EngineControlPanel />
 
-      {/* ── Section 3b: Session Summary + Performance ────────── */}
-      <SessionPerformanceBar />
-
-      {/* ── Section 3c: Trade Journal ────────────────────────── */}
+      {/* ── Trade Journal ─────────────────────────────────────── */}
       <TradeJournalPanel />
-
-      {/* ── Section 4: Positions + Risk side by side ─────────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-        <div className="lg:col-span-3">
-          <PositionsPanel />
-        </div>
-        <div className="lg:col-span-2 space-y-6">
-          <RiskMonitor />
-          <RecentOrders />
-        </div>
-      </div>
     </div>
   );
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   SECTION 1 — STATUS BAR
-   Auth status, Daily P&L, Kill Switch, Active Positions count
+   COMPACT HEADER
+   Single bar: title + auth | Daily P&L | Loss Budget | Win Rate |
+   Profit Factor | Positions | Risk | Kill Switch
    ═══════════════════════════════════════════════════════════════════════════ */
 
-function StatusBar() {
+function CompactHeader() {
   const { data: risk } = useRiskStatus();
   const { data: positions } = usePositions();
   const { data: strats } = useStrategies();
+  const { data: perf } = usePerformance();
   const [session, setSession] = useState<{
     authenticated: boolean;
   } | null>(null);
@@ -158,8 +145,13 @@ function StatusBar() {
     }
   };
 
+  const lossPercent =
+    risk && risk.daily_loss_limit > 0
+      ? (risk.daily_loss / risk.daily_loss_limit) * 100
+      : 0;
+
   return (
-    <div className="flex flex-col gap-4">
+    <div className="space-y-3">
       {/* Title row */}
       <div className="flex items-center justify-between">
         <div>
@@ -190,111 +182,119 @@ function StatusBar() {
             />
             {session?.authenticated ? "Zerodha Connected" : "Not Connected"}
           </div>
-        </div>
-      </div>
-
-      {/* Metrics row */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        {/* Daily P&L */}
-        <div className="card !p-4">
-          <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider">
-            Daily P&L
-          </p>
-          <p
-            className={cn(
-              "text-xl font-bold mt-1",
-              risk
-                ? risk.daily_pnl >= 0
-                  ? "text-emerald-400"
-                  : "text-red-400"
-                : ""
-            )}
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            {risk ? formatPnl(risk.daily_pnl) : "--"}
-          </p>
-        </div>
-
-        {/* Loss Remaining */}
-        <div className="card !p-4">
-          <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider">
-            Loss Budget Left
-          </p>
-          <p
-            className="text-xl font-bold mt-1"
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            {risk ? formatCurrency(risk.daily_loss_remaining) : "--"}
-          </p>
-          {risk && risk.daily_loss_limit > 0 && (
-            <div className="mt-1.5 h-1 rounded-full bg-white/5 overflow-hidden">
-              <div
-                className={cn(
-                  "h-full rounded-full transition-all",
-                  risk.daily_loss / risk.daily_loss_limit > 0.8
-                    ? "bg-red-500"
-                    : risk.daily_loss / risk.daily_loss_limit > 0.5
-                      ? "bg-amber-500"
-                      : "bg-emerald-500"
-                )}
-                style={{
-                  width: `${Math.min((risk.daily_loss / risk.daily_loss_limit) * 100, 100)}%`,
-                }}
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Open Positions */}
-        <div className="card !p-4">
-          <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider">
-            Open Positions
-          </p>
-          <p
-            className="text-xl font-bold mt-1"
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            {openPositionCount}
-          </p>
-        </div>
-
-        {/* Active Strategies */}
-        <div className="card !p-4">
-          <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider">
-            Running Strategies
-          </p>
-          <p
-            className="text-xl font-bold mt-1"
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            {runningStrategies}
-          </p>
-        </div>
-
-        {/* Kill Switch */}
-        <div className="card !p-4">
-          <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider">
-            Kill Switch
-          </p>
+          {/* Kill Switch */}
           <button
             onClick={handleKillSwitch}
             className={cn(
-              "mt-1 text-sm font-bold px-3 py-1 rounded-md transition-all",
+              "text-xs font-bold px-3 py-1.5 rounded-lg border transition-all",
               isKillActive
-                ? "bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30"
-                : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20"
+                ? "bg-red-500/20 text-red-400 border-red-500/40 hover:bg-red-500/30"
+                : "bg-white/5 text-[var(--muted)] border-[var(--card-border)] hover:bg-white/10 hover:text-white"
             )}
           >
-            {isKillActive ? "!! ACTIVE — Click to OFF" : "OFF"}
+            {isKillActive ? "KILL ACTIVE" : "Kill Switch"}
           </button>
         </div>
+      </div>
+
+      {/* Metrics strip — single horizontal row */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Daily P&L */}
+        <MetricChip
+          label="Daily P&L"
+          value={risk ? formatPnl(risk.daily_pnl) : "--"}
+          valueClass={risk ? (risk.daily_pnl >= 0 ? "text-emerald-400" : "text-red-400") : ""}
+        />
+
+        {/* Loss Budget */}
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--card)] border border-[var(--card-border)]">
+          <span className="text-[10px] text-[var(--muted)] uppercase tracking-wider">Loss Budget</span>
+          <div className="flex items-center gap-1.5">
+            <div className="w-16 h-1.5 rounded-full bg-white/5 overflow-hidden">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all",
+                  lossPercent > 80 ? "bg-red-500" : lossPercent > 50 ? "bg-amber-500" : "bg-emerald-500"
+                )}
+                style={{ width: `${Math.min(lossPercent, 100)}%` }}
+              />
+            </div>
+            <span
+              className="text-xs font-bold"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              {risk ? formatCurrency(risk.daily_loss_remaining) : "--"}
+            </span>
+          </div>
+        </div>
+
+        {/* Positions */}
+        <MetricChip
+          label="Positions"
+          value={`${openPositionCount}`}
+        />
+
+        {/* Strategies */}
+        <MetricChip
+          label="Strategies"
+          value={`${runningStrategies}`}
+        />
+
+        {/* Win Rate */}
+        <MetricChip
+          label="Win Rate"
+          value={perf?.win_rate != null ? `${perf.win_rate.toFixed(1)}%` : "--"}
+        />
+
+        {/* Profit Factor */}
+        <MetricChip
+          label="PF"
+          value={perf?.profit_factor != null ? perf.profit_factor.toFixed(2) : "--"}
+          valueClass={
+            perf?.profit_factor != null
+              ? perf.profit_factor >= 1.5 ? "text-emerald-400" : perf.profit_factor >= 1.0 ? "text-amber-400" : "text-red-400"
+              : ""
+          }
+        />
+
+        {/* Order Rate (risk) */}
+        {risk && (
+          <MetricChip
+            label="Orders/min"
+            value={`${risk.orders_last_minute}/${risk.order_rate_limit}`}
+          />
+        )}
       </div>
     </div>
   );
 }
 
+/* ── Metric Chip (tiny inline metric) ─────────────────────────────────── */
+
+function MetricChip({
+  label,
+  value,
+  valueClass,
+}: {
+  label: string;
+  value: string;
+  valueClass?: string;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--card)] border border-[var(--card-border)]">
+      <span className="text-[10px] text-[var(--muted)] uppercase tracking-wider">{label}</span>
+      <span
+        className={cn("text-xs font-bold", valueClass)}
+        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
-   SECTION 2 — CPR SCANNER (INLINE)
+   CPR SCANNER
    Compact scanner with index checklist, results grouped by index,
    and a "Today's Top Picks" highlight section.
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -309,14 +309,12 @@ function CPRScannerSection() {
   const [error, setError] = useState<string | null>(null);
   const [showScanner, setShowScanner] = useState(true);
 
-  // Index checklist
   const [availableIndices, setAvailableIndices] = useState<CPRIndexInfo[]>([]);
   const [selectedIndices, setSelectedIndices] = useState<Set<string>>(
     new Set()
   );
   const [indicesLoading, setIndicesLoading] = useState(true);
 
-  // Load available indices on mount
   useEffect(() => {
     backtest
       .cprIndices()
@@ -389,7 +387,6 @@ function CPRScannerSection() {
 
   return (
     <div className="space-y-4">
-      {/* Scanner Header — always visible */}
       <div className="card !p-0 overflow-hidden">
         <button
           className="w-full px-6 py-4 flex items-center justify-between hover:bg-white/[0.02] transition-colors"
@@ -425,9 +422,7 @@ function CPRScannerSection() {
 
         {showScanner && (
           <div className="px-6 pb-6 border-t border-[var(--card-border)]">
-            {/* Controls row */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-4">
-              {/* Date */}
               <div>
                 <label className="block text-[10px] text-[var(--muted)] mb-1 uppercase tracking-wider">
                   Scan Date
@@ -439,7 +434,6 @@ function CPRScannerSection() {
                   onChange={(e) => setScanDate(e.target.value)}
                 />
               </div>
-              {/* Threshold */}
               <div>
                 <label className="block text-[10px] text-[var(--muted)] mb-1 uppercase tracking-wider">
                   Narrow Threshold %
@@ -454,7 +448,6 @@ function CPRScannerSection() {
                   step={0.05}
                 />
               </div>
-              {/* Scan button */}
               <div className="flex items-end md:col-span-2">
                 <button
                   className="btn-primary px-6 py-2"
@@ -473,7 +466,6 @@ function CPRScannerSection() {
               </div>
             </div>
 
-            {/* Index checklist — compact */}
             <div className="mt-4 pt-4 border-t border-[var(--card-border)]">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] text-[var(--muted)] uppercase tracking-wider">
@@ -532,7 +524,6 @@ function CPRScannerSection() {
         )}
       </div>
 
-      {/* Results — Today's Picks + Full Grouped Results */}
       {result && <ScanResultsInline result={result} />}
     </div>
   );
@@ -550,7 +541,6 @@ function ScanResultsInline({ result }: { result: CPRScanResult }) {
     text: string;
   } | null>(null);
 
-  // Determine best index — the one with the most narrow stocks
   const indexNarrowCounts = new Map<string, number>();
   for (const stock of stocks) {
     if (stock.cpr.is_narrow) {
@@ -563,7 +553,6 @@ function ScanResultsInline({ result }: { result: CPRScanResult }) {
     (a, b) => b[1] - a[1]
   )[0]?.[0];
 
-  // Top 5 picks: narrowest CPR stocks overall
   const topPicks = stocks.filter((s) => s.cpr.is_narrow).slice(0, 5);
 
   const handleLoadToEngine = async () => {
@@ -572,7 +561,6 @@ function ScanResultsInline({ result }: { result: CPRScanResult }) {
     setLoadResult(null);
     try {
       const picks = topPicks.map((s) => {
-        // Determine direction
         let direction = "WAIT";
         if (s.today_open > s.cpr.tc) direction = "LONG";
         else if (s.today_open < s.cpr.bc) direction = "SHORT";
@@ -583,7 +571,6 @@ function ScanResultsInline({ result }: { result: CPRScanResult }) {
           direction,
           today_open: s.today_open,
           prev_close: s.prev_day.close,
-          quantity: 1,
           cpr: {
             pivot: s.cpr.pivot,
             tc: s.cpr.tc,
@@ -610,7 +597,6 @@ function ScanResultsInline({ result }: { result: CPRScanResult }) {
 
   return (
     <div className="space-y-4">
-      {/* Data source + summary bar */}
       <div className="flex flex-wrap items-center gap-3">
         <span
           className={cn(
@@ -629,7 +615,6 @@ function ScanResultsInline({ result }: { result: CPRScanResult }) {
         </span>
       </div>
 
-      {/* ── TODAY'S TOP PICKS ───────────────────────────────── */}
       {topPicks.length > 0 ? (
         <div className="card !p-0 overflow-hidden border-emerald-500/20">
           <div className="px-6 py-3 bg-emerald-500/5 border-b border-emerald-500/15">
@@ -712,7 +697,6 @@ function ScanResultsInline({ result }: { result: CPRScanResult }) {
         </div>
       ) : null}
 
-      {/* ── FULL RESULTS BY INDEX (collapsible) ─────────────── */}
       {stocks.length > 0 && (
         <FullResultsPanel stocks={stocks} indices={result.scan_params.indices_selected} errors={result.errors} />
       )}
@@ -725,7 +709,6 @@ function ScanResultsInline({ result }: { result: CPRScanResult }) {
 function TopPickRow({ stock, rank }: { stock: CPRStockEntry; rank: number }) {
   const { cpr, prev_day } = stock;
 
-  // Signal direction based on today's open vs CPR levels
   let signal: "LONG" | "SHORT" | "WAIT" = "WAIT";
   let signalColor = "text-[var(--muted)]";
   let signalBg = "bg-white/5";
@@ -824,7 +807,6 @@ function FullResultsPanel({
 }) {
   const [expanded, setExpanded] = useState(false);
 
-  // Build groups
   const groupMap = new Map<string, CPRStockEntry[]>();
   for (const indexName of indices) {
     const matching = stocks
@@ -869,7 +851,6 @@ function FullResultsPanel({
 
       {expanded && (
         <div className="border-t border-[var(--card-border)]">
-          {/* Errors */}
           {errors && errors.length > 0 && (
             <div className="px-6 py-3 bg-red-500/5 border-b border-red-500/10">
               <p className="text-xs text-red-400 font-medium mb-1">
@@ -890,7 +871,6 @@ function FullResultsPanel({
             </div>
           )}
 
-          {/* Index groups */}
           {sortedGroups.map(([indexName, indexStocks]) => (
             <IndexGroupCompact
               key={indexName}
@@ -920,7 +900,6 @@ function IndexGroupCompact({
 
   return (
     <div className="border-b border-[var(--card-border)] last:border-b-0">
-      {/* Group header */}
       <div className="px-6 py-2.5 flex items-center justify-between bg-white/[0.015]">
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold">{indexName}</span>
@@ -941,7 +920,6 @@ function IndexGroupCompact({
         </span>
       </div>
 
-      {/* Compact stock list */}
       <div className="px-6 py-2 space-y-1">
         {visible.map((stock) => (
           <CompactStockRow key={stock.instrument_token} stock={stock} />
@@ -995,24 +973,39 @@ function CompactStockRow({ stock }: { stock: CPRStockEntry }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   SECTION 3 — ENGINE CONTROL PANEL
-   Engine state, start/stop/pause, loaded picks with strategy status,
-   and a live event feed.
+   ENGINE CONTROL PANEL
+   Engine state, start/stop/pause, strategies, events, decision logs,
+   PLUS embedded positions and recent orders (consolidated view).
    ═══════════════════════════════════════════════════════════════════════════ */
 
 function EngineControlPanel() {
   const { data: swrStatus, mutate: mutateStatus } = useEngineStatus();
   const { data: swrEvents } = useEngineEvents(30);
+  const { data: positionsData } = usePositions();
+  const { data: ordersData, isLoading: ordersLoading } = useOrders();
+
+  // Track live tick prices
+  const [livePrices, setLivePrices] = useState<Record<number, number>>({});
+  const handleTick = useCallback(
+    (tick: { instrument_token: number; last_price: number }) => {
+      setLivePrices((prev) => {
+        if (prev[tick.instrument_token] === tick.last_price) return prev;
+        return { ...prev, [tick.instrument_token]: tick.last_price };
+      });
+    },
+    [],
+  );
+
   const {
     connected: wsConnected,
     status: wsStatus,
     events: wsEvents,
-  } = useEngineStream();
+    subscribeTokens,
+  } = useEngineStream({ onTick: handleTick });
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(true);
 
-  // Prefer WebSocket data when connected, fall back to SWR polling
   const status = wsConnected && wsStatus ? wsStatus : swrStatus;
   const events = wsConnected && wsEvents.length > 0 ? wsEvents : (swrEvents ?? swrStatus?.recent_events ?? []);
 
@@ -1020,6 +1013,23 @@ function EngineControlPanel() {
   const isRunning = state === "running";
   const isPaused = state === "paused";
   const hasPicks = (status?.picks_count ?? 0) > 0;
+
+  // Positions and orders
+  const positions = positionsData?.net ?? [];
+  const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0);
+  const recentOrders = ordersData?.slice(-8).reverse() ?? [];
+
+  // Subscribe to tick data
+  const subscribedRef = useRef<string>("");
+  useEffect(() => {
+    if (!wsConnected || !status?.strategies) return;
+    const tokens = Object.keys(status.strategies).map(Number).filter(Boolean);
+    const key = tokens.sort().join(",");
+    if (key && key !== subscribedRef.current) {
+      subscribeTokens(tokens);
+      subscribedRef.current = key;
+    }
+  }, [wsConnected, status?.strategies, subscribeTokens]);
 
   const handleAction = async (action: string) => {
     setActionLoading(action);
@@ -1049,7 +1059,7 @@ function EngineControlPanel() {
 
   return (
     <div className="card !p-0 overflow-hidden">
-      {/* Header with state badge + controls */}
+      {/* Header */}
       <button
         className="w-full px-6 py-4 flex items-center justify-between hover:bg-white/[0.02] transition-colors"
         onClick={() => setExpanded(!expanded)}
@@ -1078,8 +1088,8 @@ function EngineControlPanel() {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          {/* WebSocket connection indicator */}
+        <div className="flex items-center gap-3">
+          {/* Connection indicators */}
           <span
             className={cn(
               "flex items-center gap-1.5 text-[10px]",
@@ -1098,6 +1108,21 @@ function EngineControlPanel() {
             <span className="flex items-center gap-1.5 text-[10px] text-emerald-400">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
               Ticker
+            </span>
+          )}
+          {/* Positions count + P&L inline */}
+          {positions.length > 0 && (
+            <span className="flex items-center gap-1.5 text-xs">
+              <span className="text-[var(--muted)]">{positions.length} pos</span>
+              <span
+                className={cn(
+                  "font-bold",
+                  totalPnl >= 0 ? "text-emerald-400" : "text-red-400"
+                )}
+                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+              >
+                {formatPnl(totalPnl)}
+              </span>
             </span>
           )}
           {status && status.metrics.session_pnl !== 0 && (
@@ -1119,7 +1144,6 @@ function EngineControlPanel() {
           {/* Controls bar */}
           <div className="px-6 py-4 flex items-center justify-between border-b border-[var(--card-border)] bg-white/[0.01]">
             <div className="flex items-center gap-2">
-              {/* Start */}
               {!isRunning && !isPaused && (
                 <button
                   className="btn-primary px-4 py-1.5 text-xs"
@@ -1136,7 +1160,6 @@ function EngineControlPanel() {
                   )}
                 </button>
               )}
-              {/* Pause / Resume */}
               {isRunning && (
                 <button
                   className="btn-outline px-4 py-1.5 text-xs"
@@ -1155,7 +1178,6 @@ function EngineControlPanel() {
                   {actionLoading === "resume" ? "Resuming..." : "Resume"}
                 </button>
               )}
-              {/* Stop */}
               {(isRunning || isPaused) && (
                 <button
                   className="px-4 py-1.5 text-xs rounded-md border border-red-500/30 bg-red-500/5 text-red-400 hover:bg-red-500/10 transition-colors"
@@ -1171,7 +1193,6 @@ function EngineControlPanel() {
                 </span>
               )}
             </div>
-            {/* Metrics summary */}
             {status && (
               <div
                 className="flex items-center gap-5 text-xs text-[var(--muted)]"
@@ -1190,16 +1211,135 @@ function EngineControlPanel() {
             </div>
           )}
 
-          {/* Two columns: Strategies + Events */}
+          {/* Strategies + Events side by side */}
           {hasPicks && (
             <div className="grid grid-cols-1 lg:grid-cols-5 divide-y lg:divide-y-0 lg:divide-x divide-[var(--card-border)]">
-              {/* Strategies / Picks */}
               <div className="lg:col-span-3 p-4">
-                <EngineStrategiesTable strategies={status?.strategies ?? {}} />
+                <EngineStrategiesTable strategies={status?.strategies ?? {}} livePrices={livePrices} />
               </div>
-              {/* Event Feed */}
               <div className="lg:col-span-2 p-4">
                 <EngineEventFeed events={events} />
+              </div>
+            </div>
+          )}
+
+          {/* Decision Logs */}
+          {hasPicks && (
+            <div className="border-t border-[var(--card-border)]">
+              <div className="p-4">
+                <DecisionLogsPanel />
+              </div>
+            </div>
+          )}
+
+          {/* Positions + Orders — embedded in engine panel */}
+          {(positions.length > 0 || recentOrders.length > 0) && (
+            <div className="border-t border-[var(--card-border)]">
+              <div className="grid grid-cols-1 lg:grid-cols-5 divide-y lg:divide-y-0 lg:divide-x divide-[var(--card-border)]">
+                {/* Positions */}
+                <div className="lg:col-span-3 p-4">
+                  <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-3">
+                    Open Positions
+                    {positions.length > 0 && (
+                      <span
+                        className={cn(
+                          "ml-2 text-xs font-bold",
+                          totalPnl >= 0 ? "text-emerald-400" : "text-red-400"
+                        )}
+                        style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                      >
+                        Total: {formatPnl(totalPnl)}
+                      </span>
+                    )}
+                  </p>
+                  {positions.length === 0 ? (
+                    <p className="text-xs text-[var(--muted)] text-center py-4">
+                      No open positions
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {positions.map((p) => (
+                        <div
+                          key={p.trading_symbol}
+                          className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-white/[0.02] border border-[var(--card-border)]"
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <span
+                              className={cn(
+                                "text-[10px] font-bold px-1.5 py-0.5 rounded",
+                                p.quantity > 0
+                                  ? "bg-emerald-500/10 text-emerald-400"
+                                  : "bg-red-500/10 text-red-400"
+                              )}
+                            >
+                              {p.quantity > 0 ? "LONG" : "SHORT"}
+                            </span>
+                            <span className="font-medium text-sm">{p.trading_symbol}</span>
+                            <span className="text-[10px] text-[var(--muted)]">{p.exchange}</span>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <span
+                              className="text-[10px] text-[var(--muted)]"
+                              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                            >
+                              {Math.abs(p.quantity)} @ {formatNumber(p.average_price)} | LTP {formatNumber(p.last_price)}
+                            </span>
+                            <span
+                              className={cn(
+                                "text-sm font-bold min-w-[70px] text-right",
+                                p.pnl >= 0 ? "pnl-positive" : "pnl-negative"
+                              )}
+                              style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                            >
+                              {formatPnl(p.pnl)}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Recent Orders */}
+                <div className="lg:col-span-2 p-4">
+                  <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-3">
+                    Recent Orders
+                  </p>
+                  {ordersLoading ? (
+                    <p className="text-xs text-[var(--muted)] text-center py-4">Loading...</p>
+                  ) : recentOrders.length === 0 ? (
+                    <p className="text-xs text-[var(--muted)] text-center py-4">
+                      No orders today
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {recentOrders.map((o) => (
+                        <div
+                          key={o.order_id}
+                          className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/[0.015]"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={cn(
+                                "text-[10px] font-bold px-1.5 py-0.5 rounded",
+                                o.transaction_type === "BUY"
+                                  ? "bg-emerald-500/10 text-emerald-400"
+                                  : "bg-red-500/10 text-red-400"
+                              )}
+                            >
+                              {o.transaction_type}
+                            </span>
+                            <span className="text-xs font-medium">{o.trading_symbol}</span>
+                            <span className="text-[10px] text-[var(--muted)]">
+                              x{o.quantity}
+                            </span>
+                          </div>
+                          <OrderStatusBadge status={o.status} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -1264,8 +1404,10 @@ function EngineStateBadge({ state }: { state: string }) {
 
 function EngineStrategiesTable({
   strategies,
+  livePrices,
 }: {
   strategies: Record<string, EngineStrategyDetail>;
+  livePrices: Record<number, number>;
 }) {
   const entries = Object.entries(strategies);
 
@@ -1291,6 +1433,7 @@ function EngineStrategiesTable({
               <th className="text-center py-2 px-2">State</th>
               <th className="text-right py-2 px-2">CPR %</th>
               <th className="text-center py-2 px-2">Position</th>
+              <th className="text-right py-2 px-2">LTP</th>
               <th className="text-right py-2 px-2">Entry</th>
               <th className="text-right py-2 px-2">SL</th>
               <th className="text-right py-2 px-2">Target</th>
@@ -1298,95 +1441,117 @@ function EngineStrategiesTable({
             </tr>
           </thead>
           <tbody>
-            {entries.map(([token, s]) => (
-              <tr
-                key={token}
-                className="border-t border-[var(--card-border)] hover:bg-white/[0.02] transition-colors"
-              >
-                <td className="py-2 pr-2 font-medium">{s.symbol}</td>
-                <td className="py-2 px-2 text-center">
-                  <span
-                    className={cn(
-                      "inline-block px-1.5 py-0.5 rounded text-[10px] font-bold",
-                      s.direction === "LONG"
-                        ? "bg-emerald-500/10 text-emerald-400"
-                        : s.direction === "SHORT"
-                          ? "bg-red-500/10 text-red-400"
-                          : "bg-white/5 text-[var(--muted)]"
-                    )}
-                  >
-                    {s.direction}
-                  </span>
-                </td>
-                <td className="py-2 px-2 text-center">
-                  <span
-                    className={cn(
-                      "text-[10px]",
-                      s.state === "running"
-                        ? "text-emerald-400"
-                        : s.state === "paused"
-                          ? "text-amber-400"
-                          : "text-[var(--muted)]"
-                    )}
-                  >
-                    {s.state}
-                  </span>
-                </td>
-                <td
-                  className="py-2 px-2 text-right text-emerald-400"
-                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
+            {entries.map(([token, s]) => {
+              const ltp = livePrices[Number(token)];
+              let unrealizedPnl: number | null = null;
+              if (ltp && s.position && s.entry_price > 0) {
+                unrealizedPnl = s.position === "LONG"
+                  ? ltp - s.entry_price
+                  : s.entry_price - ltp;
+              }
+              return (
+                <tr
+                  key={token}
+                  className="border-t border-[var(--card-border)] hover:bg-white/[0.02] transition-colors"
                 >
-                  {s.cpr ? s.cpr.width_pct.toFixed(3) + "%" : "-"}
-                </td>
-                <td className="py-2 px-2 text-center">
-                  {s.position ? (
+                  <td className="py-2 pr-2 font-medium">{s.symbol}</td>
+                  <td className="py-2 px-2 text-center">
                     <span
                       className={cn(
-                        "text-[10px] font-bold",
-                        s.position === "LONG"
-                          ? "text-emerald-400"
-                          : "text-red-400"
+                        "inline-block px-1.5 py-0.5 rounded text-[10px] font-bold",
+                        s.direction === "LONG"
+                          ? "bg-emerald-500/10 text-emerald-400"
+                          : s.direction === "SHORT"
+                            ? "bg-red-500/10 text-red-400"
+                            : "bg-white/5 text-[var(--muted)]"
                       )}
                     >
-                      {s.position}
+                      {s.direction}
                     </span>
-                  ) : s.traded_today ? (
-                    <span className="text-[10px] text-[var(--muted)]">done</span>
-                  ) : (
-                    <span className="text-[10px] text-[var(--muted)]">--</span>
-                  )}
-                </td>
-                <td
-                  className="py-2 px-2 text-right"
-                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                >
-                  {s.entry_price > 0 ? formatNumber(s.entry_price) : "--"}
-                </td>
-                <td
-                  className="py-2 px-2 text-right text-red-400/70"
-                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                >
-                  {s.stop_loss > 0 ? formatNumber(s.stop_loss) : "--"}
-                </td>
-                <td
-                  className="py-2 px-2 text-right text-emerald-400/70"
-                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                >
-                  {s.target > 0 ? formatNumber(s.target) : "--"}
-                </td>
-                <td
-                  className={cn(
-                    "py-2 pl-2 text-right font-bold",
-                    s.metrics.total_pnl >= 0 ? "text-emerald-400" : "text-red-400"
-                  )}
-                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                >
-                  {s.metrics.total_pnl !== 0
-                    ? formatPnl(s.metrics.total_pnl)
-                    : "--"}
-                </td>
-              </tr>
-            ))}
+                  </td>
+                  <td className="py-2 px-2 text-center">
+                    <span
+                      className={cn(
+                        "text-[10px]",
+                        s.state === "running"
+                          ? "text-emerald-400"
+                          : s.state === "paused"
+                            ? "text-amber-400"
+                            : "text-[var(--muted)]"
+                      )}
+                    >
+                      {s.state}
+                    </span>
+                  </td>
+                  <td
+                    className="py-2 px-2 text-right text-emerald-400"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {s.cpr ? s.cpr.width_pct.toFixed(3) + "%" : "-"}
+                  </td>
+                  <td className="py-2 px-2 text-center">
+                    {s.position ? (
+                      <span
+                        className={cn(
+                          "text-[10px] font-bold",
+                          s.position === "LONG"
+                            ? "text-emerald-400"
+                            : "text-red-400"
+                        )}
+                      >
+                        {s.position}
+                      </span>
+                    ) : s.traded_today ? (
+                      <span className="text-[10px] text-[var(--muted)]">done</span>
+                    ) : (
+                      <span className="text-[10px] text-[var(--muted)]">--</span>
+                    )}
+                  </td>
+                  <td
+                    className={cn(
+                      "py-2 px-2 text-right",
+                      ltp ? "text-white" : "text-[var(--muted)]"
+                    )}
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {ltp ? formatNumber(ltp) : "--"}
+                  </td>
+                  <td
+                    className="py-2 px-2 text-right"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {s.entry_price > 0 ? formatNumber(s.entry_price) : "--"}
+                  </td>
+                  <td
+                    className="py-2 px-2 text-right text-red-400/70"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {s.stop_loss > 0 ? formatNumber(s.stop_loss) : "--"}
+                  </td>
+                  <td
+                    className="py-2 px-2 text-right text-emerald-400/70"
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {s.target > 0 ? formatNumber(s.target) : "--"}
+                  </td>
+                  <td
+                    className={cn(
+                      "py-2 pl-2 text-right font-bold",
+                      unrealizedPnl !== null
+                        ? unrealizedPnl >= 0 ? "text-emerald-400" : "text-red-400"
+                        : s.metrics.total_pnl >= 0 ? "text-emerald-400" : "text-red-400"
+                    )}
+                    style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                  >
+                    {unrealizedPnl !== null
+                      ? formatPnl(unrealizedPnl)
+                      : s.metrics.total_pnl !== 0
+                        ? formatPnl(s.metrics.total_pnl)
+                        : "--"}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1434,7 +1599,7 @@ function EngineEventFeed({ events }: { events: EngineEvent[] }) {
 }
 
 function EventTypeIcon({ type }: { type: string }) {
-  const config: Record<string, { color: string; symbol: string }> = {
+  const iconConfig: Record<string, { color: string; symbol: string }> = {
     signal: { color: "text-blue-400", symbol: "~" },
     order: { color: "text-amber-400", symbol: "$" },
     fill: { color: "text-emerald-400", symbol: "+" },
@@ -1442,8 +1607,13 @@ function EventTypeIcon({ type }: { type: string }) {
     error: { color: "text-red-400", symbol: "!" },
     scan: { color: "text-purple-400", symbol: "#" },
     info: { color: "text-[var(--muted)]", symbol: ">" },
+    "log:strategy": { color: "text-cyan-400", symbol: "S" },
+    "log:risk": { color: "text-amber-400", symbol: "R" },
+    "log:order_manager": { color: "text-emerald-400", symbol: "O" },
+    "log:engine": { color: "text-purple-400", symbol: "E" },
+    "log:system": { color: "text-[var(--muted)]", symbol: "L" },
   };
-  const c = config[type] ?? config.info;
+  const c = iconConfig[type] ?? iconConfig.info;
   return (
     <span
       className={cn("text-[10px] font-bold w-3 flex-shrink-0 text-center mt-0.5", c.color)}
@@ -1468,94 +1638,103 @@ function formatEventTime(iso: string): string {
   }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   SECTION 4 — POSITIONS PANEL
-   Current MIS intraday positions with live P&L
-   ═══════════════════════════════════════════════════════════════════════════ */
+/* ── Decision Logs Panel ─────────────────────────────────────────────── */
 
-function PositionsPanel() {
-  const { data, isLoading } = usePositions();
-  const positions = data?.net ?? [];
+function DecisionLogsPanel() {
+  const [component, setComponent] = useState<string>("");
+  const [level, setLevel] = useState<string>("");
+  const { data, mutate: mutateLogs } = useDecisionLogs({
+    component: component || undefined,
+    level: level || undefined,
+    limit: 100,
+  });
 
-  const totalPnl = positions.reduce((sum, p) => sum + p.pnl, 0);
+  const entries = data?.entries ?? [];
+
+  const levelColors: Record<string, string> = {
+    debug: "text-[var(--muted)]",
+    info: "text-blue-400",
+    warn: "text-amber-400",
+    error: "text-red-400",
+  };
+
+  const componentLabels: Record<string, string> = {
+    strategy: "STR",
+    risk: "RSK",
+    order_manager: "ORD",
+    engine: "ENG",
+  };
 
   return (
     <div className="card">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold">Open Positions</h3>
-        {positions.length > 0 && (
-          <span
-            className={cn(
-              "text-sm font-bold",
-              totalPnl >= 0 ? "text-emerald-400" : "text-red-400"
-            )}
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider font-semibold">
+          Decision Logs
+          {data ? ` (${data.count}/${data.total_buffered})` : ""}
+        </p>
+        <div className="flex items-center gap-2">
+          <select
+            className="text-[10px] bg-[var(--background)] border border-[var(--card-border)] rounded px-1.5 py-0.5 text-[var(--muted)]"
+            value={component}
+            onChange={(e) => setComponent(e.target.value)}
           >
-            Total: {formatPnl(totalPnl)}
-          </span>
-        )}
-      </div>
-
-      {isLoading && (
-        <p className="text-[var(--muted)] text-sm">Loading...</p>
-      )}
-
-      {!isLoading && positions.length === 0 && (
-        <div className="text-center py-8">
-          <p className="text-[var(--muted)] text-sm">No open positions</p>
-          <p className="text-[10px] text-[var(--muted)] mt-1">
-            Positions will appear here when you enter a trade
-          </p>
+            <option value="">All Components</option>
+            <option value="strategy">Strategy</option>
+            <option value="risk">Risk</option>
+            <option value="order_manager">Order Manager</option>
+            <option value="engine">Engine</option>
+          </select>
+          <select
+            className="text-[10px] bg-[var(--background)] border border-[var(--card-border)] rounded px-1.5 py-0.5 text-[var(--muted)]"
+            value={level}
+            onChange={(e) => setLevel(e.target.value)}
+          >
+            <option value="">All Levels</option>
+            <option value="debug">Debug</option>
+            <option value="info">Info</option>
+            <option value="warn">Warn</option>
+            <option value="error">Error</option>
+          </select>
+          <button
+            className="text-[10px] text-[var(--muted)] hover:text-white border border-[var(--card-border)] rounded px-2 py-0.5 transition-colors"
+            onClick={async () => {
+              await engine.clearLogs();
+              mutateLogs();
+            }}
+          >
+            Clear
+          </button>
         </div>
-      )}
-
-      {positions.length > 0 && (
-        <div className="space-y-2">
-          {positions.map((p) => (
+      </div>
+      {entries.length === 0 ? (
+        <p className="text-xs text-[var(--muted)] text-center py-6">
+          No decision logs yet. Start the engine to see decisions.
+        </p>
+      ) : (
+        <div className="space-y-0.5 max-h-[320px] overflow-y-auto font-mono text-[11px]">
+          {[...entries].reverse().map((entry, i) => (
             <div
-              key={p.trading_symbol}
-              className="flex items-center justify-between py-3 px-4 rounded-lg bg-white/[0.02] border border-[var(--card-border)]"
+              key={`${entry.timestamp}-${i}`}
+              className="flex items-start gap-2 py-1 px-2 rounded hover:bg-white/[0.02]"
             >
-              <div className="flex items-center gap-3">
-                <span
-                  className={cn(
-                    "text-[10px] font-bold px-1.5 py-0.5 rounded",
-                    p.quantity > 0
-                      ? "bg-emerald-500/10 text-emerald-400"
-                      : "bg-red-500/10 text-red-400"
-                  )}
-                >
-                  {p.quantity > 0 ? "LONG" : "SHORT"}
-                </span>
-                <div>
-                  <span className="font-medium text-sm">
-                    {p.trading_symbol}
-                  </span>
-                  <span className="text-xs text-[var(--muted)] ml-2">
-                    {p.exchange}
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center gap-6">
-                <div
-                  className="text-right text-xs text-[var(--muted)]"
-                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                >
-                  <div>
-                    Qty: {Math.abs(p.quantity)} @ {formatNumber(p.average_price)}
-                  </div>
-                  <div>LTP: {formatNumber(p.last_price)}</div>
-                </div>
-                <span
-                  className={cn(
-                    "text-sm font-bold min-w-[80px] text-right",
-                    p.pnl >= 0 ? "pnl-positive" : "pnl-negative"
-                  )}
-                  style={{ fontFamily: "'JetBrains Mono', monospace" }}
-                >
-                  {formatPnl(p.pnl)}
-                </span>
-              </div>
+              <span className={cn(
+                "flex-shrink-0 w-[26px] text-center text-[9px] font-bold uppercase rounded px-0.5",
+                entry.level === "error" ? "bg-red-500/15 text-red-400" :
+                entry.level === "warn" ? "bg-amber-500/15 text-amber-400" :
+                entry.level === "info" ? "bg-blue-500/10 text-blue-400" :
+                "bg-white/5 text-[var(--muted)]"
+              )}>
+                {entry.level.slice(0, 3).toUpperCase()}
+              </span>
+              <span className="flex-shrink-0 w-[24px] text-[9px] font-bold text-[var(--muted)]">
+                {componentLabels[entry.component] ?? entry.component.slice(0, 3).toUpperCase()}
+              </span>
+              <span className={cn("flex-1 min-w-0 truncate", levelColors[entry.level] ?? "text-white")}>
+                {entry.message}
+              </span>
+              <span className="flex-shrink-0 text-[9px] text-[var(--muted)]">
+                {formatEventTime(entry.timestamp)}
+              </span>
             </div>
           ))}
         </div>
@@ -1564,140 +1743,7 @@ function PositionsPanel() {
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   SECTION 5 — RISK MONITOR
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function RiskMonitor() {
-  const { data: risk } = useRiskStatus();
-
-  if (!risk) return null;
-
-  const lossPercent =
-    risk.daily_loss_limit > 0
-      ? (risk.daily_loss / risk.daily_loss_limit) * 100
-      : 0;
-
-  return (
-    <div className="card">
-      <h3 className="text-sm font-semibold mb-4">Risk Monitor</h3>
-      <div className="space-y-4">
-        {/* Daily Loss Progress */}
-        <div>
-          <div className="flex items-center justify-between text-xs mb-1.5">
-            <span className="text-[var(--muted)]">Daily Loss Used</span>
-            <span
-              className="text-[var(--muted)]"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
-            >
-              {formatCurrency(risk.daily_loss)} /{" "}
-              {formatCurrency(risk.daily_loss_limit)}
-            </span>
-          </div>
-          <div className="h-2 rounded-full bg-white/5 overflow-hidden">
-            <div
-              className={cn(
-                "h-full rounded-full transition-all duration-500",
-                lossPercent > 80
-                  ? "bg-red-500"
-                  : lossPercent > 50
-                    ? "bg-amber-500"
-                    : "bg-emerald-500"
-              )}
-              style={{ width: `${Math.min(lossPercent, 100)}%` }}
-            />
-          </div>
-        </div>
-
-        {/* Stats */}
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider">
-              Order Rate
-            </p>
-            <p
-              className="text-sm font-bold mt-0.5"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
-            >
-              {risk.orders_last_minute}/{risk.order_rate_limit}
-              <span className="text-[10px] text-[var(--muted)] ml-1">
-                /min
-              </span>
-            </p>
-          </div>
-          <div>
-            <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider">
-              Loss Remaining
-            </p>
-            <p
-              className={cn(
-                "text-sm font-bold mt-0.5",
-                risk.daily_loss_remaining < 10000
-                  ? "text-red-400"
-                  : "text-emerald-400"
-              )}
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
-            >
-              {formatCurrency(risk.daily_loss_remaining)}
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   SECTION 6 — RECENT ORDERS
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function RecentOrders() {
-  const { data, isLoading } = useOrders();
-  const recentOrders = data?.slice(-8).reverse() ?? [];
-
-  return (
-    <div className="card">
-      <h3 className="text-sm font-semibold mb-4">Recent Orders</h3>
-
-      {isLoading && (
-        <p className="text-[var(--muted)] text-sm">Loading...</p>
-      )}
-
-      {!isLoading && recentOrders.length === 0 && (
-        <p className="text-[var(--muted)] text-xs text-center py-4">
-          No orders today
-        </p>
-      )}
-
-      <div className="space-y-1.5">
-        {recentOrders.map((o) => (
-          <div
-            key={o.order_id}
-            className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/[0.015]"
-          >
-            <div className="flex items-center gap-2">
-              <span
-                className={cn(
-                  "text-[10px] font-bold px-1.5 py-0.5 rounded",
-                  o.transaction_type === "BUY"
-                    ? "bg-emerald-500/10 text-emerald-400"
-                    : "bg-red-500/10 text-red-400"
-                )}
-              >
-                {o.transaction_type}
-              </span>
-              <span className="text-xs font-medium">{o.trading_symbol}</span>
-              <span className="text-[10px] text-[var(--muted)]">
-                x{o.quantity}
-              </span>
-            </div>
-            <OrderStatusBadge status={o.status} />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+/* ── Order Status Badge ──────────────────────────────────────────────── */
 
 function OrderStatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
@@ -1716,141 +1762,7 @@ function OrderStatusBadge({ status }: { status: string }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   SECTION 7 — SESSION PERFORMANCE BAR
-   Today's P&L, Win Rate, Performance Metrics — compact top-level summary
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-function SessionPerformanceBar() {
-  const { data: session, isLoading } = useSessionSummary();
-  const { data: todayPnl } = useTodayPnl();
-  const { data: perf } = usePerformance();
-
-  if (isLoading) {
-    return (
-      <div className="card">
-        <p className="text-[var(--muted)] text-sm">Loading session...</p>
-      </div>
-    );
-  }
-
-  const today = todayPnl ?? session?.today_pnl;
-  const performance = perf ?? session?.performance;
-
-  return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-      {/* Today's P&L */}
-      <div className="card !p-4">
-        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
-          Today&apos;s P&amp;L
-        </p>
-        <p
-          className={cn(
-            "text-lg font-bold",
-            (today?.net_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
-          )}
-          style={{ fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          {formatPnl(today?.net_pnl ?? 0)}
-        </p>
-        <p className="text-[10px] text-[var(--muted)] mt-1">
-          {today?.total_trades ?? 0} trades
-          {today?.win_rate ? ` · ${today.win_rate}% win` : ""}
-        </p>
-      </div>
-
-      {/* Session P&L */}
-      <div className="card !p-4">
-        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
-          Session P&amp;L
-        </p>
-        <p
-          className={cn(
-            "text-lg font-bold",
-            (session?.session_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"
-          )}
-          style={{ fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          {formatPnl(session?.session_pnl ?? 0)}
-        </p>
-        <p className="text-[10px] text-[var(--muted)] mt-1">
-          {session?.open_trades ?? 0} open · {session?.closed_trades ?? 0} closed
-        </p>
-      </div>
-
-      {/* Win Rate */}
-      <div className="card !p-4">
-        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
-          Win Rate
-        </p>
-        <p
-          className="text-lg font-bold"
-          style={{ fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          {performance?.win_rate?.toFixed(1) ?? "0.0"}%
-        </p>
-        <p className="text-[10px] text-[var(--muted)] mt-1">
-          {performance?.winning_trades ?? 0}W / {performance?.losing_trades ?? 0}L
-        </p>
-      </div>
-
-      {/* Profit Factor */}
-      <div className="card !p-4">
-        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
-          Profit Factor
-        </p>
-        <p
-          className={cn(
-            "text-lg font-bold",
-            (performance?.profit_factor ?? 0) >= 1.5 ? "text-emerald-400" :
-            (performance?.profit_factor ?? 0) >= 1.0 ? "text-amber-400" : "text-red-400"
-          )}
-          style={{ fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          {performance?.profit_factor?.toFixed(2) ?? "0.00"}
-        </p>
-        <p className="text-[10px] text-[var(--muted)] mt-1">
-          Avg win {formatCurrency(performance?.avg_winner ?? 0)}
-        </p>
-      </div>
-
-      {/* Max Drawdown */}
-      <div className="card !p-4">
-        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
-          Max Drawdown
-        </p>
-        <p
-          className="text-lg font-bold text-red-400"
-          style={{ fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          {formatCurrency(performance?.max_drawdown ?? 0)}
-        </p>
-        <p className="text-[10px] text-[var(--muted)] mt-1">
-          Avg loss {formatCurrency(performance?.avg_loser ?? 0)}
-        </p>
-      </div>
-
-      {/* Avg Trade Duration */}
-      <div className="card !p-4">
-        <p className="text-[10px] text-[var(--muted)] uppercase tracking-wider mb-1">
-          Avg Duration
-        </p>
-        <p
-          className="text-lg font-bold"
-          style={{ fontFamily: "'JetBrains Mono', monospace" }}
-        >
-          {performance?.avg_trade_duration_min?.toFixed(0) ?? "0"}
-          <span className="text-xs text-[var(--muted)] ml-0.5">min</span>
-        </p>
-        <p className="text-[10px] text-[var(--muted)] mt-1">
-          {performance?.total_trades ?? 0} total trades
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   SECTION 8 — TRADE JOURNAL TABLE
+   TRADE JOURNAL TABLE
    Recent trades with direction, P&L, exit reason, and status
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -1869,7 +1781,6 @@ function TradeJournalPanel() {
 
   return (
     <div className="card">
-      {/* Header + Filters */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
           <h3 className="text-sm font-semibold">Trade Journal</h3>
@@ -1945,7 +1856,6 @@ function TradeRow({ trade }: { trade: JournalTrade }) {
 
   return (
     <tr className="border-b border-[var(--card-border)]/50 hover:bg-white/[0.015] transition-colors">
-      {/* Symbol */}
       <td className="py-2.5 pr-3">
         <div className="flex items-center gap-1.5">
           <span className="font-medium">{trade.trading_symbol}</span>
@@ -1956,8 +1866,6 @@ function TradeRow({ trade }: { trade: JournalTrade }) {
           )}
         </div>
       </td>
-
-      {/* Direction */}
       <td className="py-2.5 pr-3">
         <span
           className={cn(
@@ -1970,23 +1878,15 @@ function TradeRow({ trade }: { trade: JournalTrade }) {
           {trade.direction}
         </span>
       </td>
-
-      {/* Entry Price */}
       <td className="py-2.5 pr-3 text-right" style={mono}>
         {formatNumber(trade.entry_price, 2)}
       </td>
-
-      {/* Exit Price */}
       <td className="py-2.5 pr-3 text-right text-[var(--muted)]" style={mono}>
-        {trade.exit_price ? formatNumber(trade.exit_price, 2) : "—"}
+        {trade.exit_price ? formatNumber(trade.exit_price, 2) : "\u2014"}
       </td>
-
-      {/* Quantity */}
       <td className="py-2.5 pr-3 text-right" style={mono}>
         {trade.quantity}
       </td>
-
-      {/* P&L */}
       <td
         className={cn(
           "py-2.5 pr-3 text-right font-medium",
@@ -1994,10 +1894,8 @@ function TradeRow({ trade }: { trade: JournalTrade }) {
         )}
         style={mono}
       >
-        {trade.is_open ? "—" : formatPnl(trade.pnl)}
+        {trade.is_open ? "\u2014" : formatPnl(trade.pnl)}
       </td>
-
-      {/* P&L % */}
       <td
         className={cn(
           "py-2.5 pr-3 text-right",
@@ -2005,27 +1903,19 @@ function TradeRow({ trade }: { trade: JournalTrade }) {
         )}
         style={mono}
       >
-        {trade.is_open ? "—" : `${trade.pnl_pct >= 0 ? "+" : ""}${trade.pnl_pct.toFixed(2)}%`}
+        {trade.is_open ? "\u2014" : `${trade.pnl_pct >= 0 ? "+" : ""}${trade.pnl_pct.toFixed(2)}%`}
       </td>
-
-      {/* Risk:Reward Actual */}
       <td className="py-2.5 pr-3 text-right" style={mono}>
-        {trade.risk_reward_actual != null ? trade.risk_reward_actual.toFixed(2) : "—"}
+        {trade.risk_reward_actual != null ? trade.risk_reward_actual.toFixed(2) : "\u2014"}
       </td>
-
-      {/* Exit Reason */}
       <td className="py-2.5 pr-3 text-left">
         <ExitReasonBadge reason={trade.exit_reason} isOpen={trade.is_open} />
       </td>
-
-      {/* Duration */}
       <td className="py-2.5 pr-3 text-right text-[var(--muted)]" style={mono}>
         {trade.duration_minutes != null
           ? `${trade.duration_minutes.toFixed(0)}m`
-          : "—"}
+          : "\u2014"}
       </td>
-
-      {/* Status */}
       <td className="py-2.5 text-center">
         <span
           className={cn(

@@ -39,6 +39,7 @@ from app.providers.types import (
     Variety,
     Validity,
 )
+from app.services.decision_log import decision_log
 from app.strategies.base import ParamDef, ParamType, Strategy, StrategySignal
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,9 @@ class CPRBreakoutStrategy(Strategy):
         # Trailing stop loss tracking
         self._trailing_peak: float = 0.0  # High watermark (LONG) or low watermark (SHORT)
 
+        # Order confirmation guard — prevents SL checks before entry order is placed
+        self._order_confirmed: bool = False
+
         # History of daily OHLC for building CPR
         self._first_candle_seen: bool = False
 
@@ -249,11 +253,35 @@ class CPRBreakoutStrategy(Strategy):
                 min_value=0.05,
                 max_value=3.0,
             ),
+            ParamDef(
+                name="min_sl_distance_pct",
+                param_type=ParamType.FLOAT,
+                default=0.1,
+                label="Min SL Distance %",
+                description="Minimum stop-loss distance as percentage of entry price (prevents sub-tick SL)",
+                min_value=0.01,
+                max_value=2.0,
+            ),
         ]
 
     def get_instruments(self) -> list[int]:
         token = self.get_param("instrument_token", 0)
         return [token] if token else []
+
+    async def on_order_update(self, order: Any) -> None:
+        """
+        Called when an order placed by this strategy is confirmed filled.
+        Sets _order_confirmed so tick-level SL/target checks can begin.
+        """
+        from app.providers.types import OrderStatus
+        status = getattr(order, "status", None)
+        if status == OrderStatus.COMPLETE:
+            self._order_confirmed = True
+            decision_log.log("strategy", "info", "Order confirmed — SL/target checks active", {
+                "symbol": self.get_param("trading_symbol"),
+                "order_id": getattr(order, "order_id", "?"),
+                "position": self._position,
+            })
 
     async def on_tick(self, tick: TickData) -> None:
         """
@@ -272,6 +300,10 @@ class CPRBreakoutStrategy(Strategy):
         if self._position is None:
             return
 
+        # Guard: don't check SL/target until entry order is confirmed filled
+        if not self._order_confirmed:
+            return
+
         if tick.instrument_token != self.get_param("instrument_token"):
             return
 
@@ -284,6 +316,7 @@ class CPRBreakoutStrategy(Strategy):
         # ── Trailing stop loss ──────────────────────────────────────
         trail_pct = self.get_param("trail_activation_pct", 0.3)  # Activate after 0.3% move in profit
         trail_distance_pct = self.get_param("trail_distance_pct", 0.2)  # Trail by 0.2% from peak
+        min_sl_pct = self.get_param("min_sl_distance_pct", 0.1)  # Minimum SL distance
 
         if self._position == "LONG":
             # Track high water mark
@@ -294,9 +327,21 @@ class CPRBreakoutStrategy(Strategy):
             profit_pct = ((price - self._entry_price) / self._entry_price) * 100.0
             if profit_pct >= trail_pct and self._trailing_peak > 0:
                 trail_sl = self._trailing_peak * (1.0 - trail_distance_pct / 100.0)
-                if trail_sl > self._stop_loss:
+                # Fix #4: Only replace SL if trailing SL locks in profit (above entry)
+                # Fix #6: Enforce minimum SL distance from current price
+                min_sl_distance = price * (min_sl_pct / 100.0)
+                if (
+                    trail_sl > self._stop_loss
+                    and trail_sl > self._entry_price  # Must lock in profit
+                    and (price - trail_sl) >= min_sl_distance  # Min distance
+                ):
                     old_sl = self._stop_loss
                     self._stop_loss = round(trail_sl, 2)
+                    decision_log.log("strategy", "info", "Trailing SL updated (LONG)", {
+                        "symbol": self.get_param("trading_symbol"),
+                        "old_sl": old_sl, "new_sl": self._stop_loss,
+                        "peak": self._trailing_peak, "price": price,
+                    })
                     logger.debug(
                         "Trailing SL updated LONG %s: %.2f → %.2f (peak=%.2f)",
                         self.get_param("trading_symbol"), old_sl, self._stop_loss,
@@ -324,9 +369,21 @@ class CPRBreakoutStrategy(Strategy):
             profit_pct = ((self._entry_price - price) / self._entry_price) * 100.0
             if profit_pct >= trail_pct and self._trailing_peak > 0:
                 trail_sl = self._trailing_peak * (1.0 + trail_distance_pct / 100.0)
-                if trail_sl < self._stop_loss:
+                # Fix #4: Only replace SL if trailing SL locks in profit (below entry)
+                # Fix #6: Enforce minimum SL distance from current price
+                min_sl_distance = price * (min_sl_pct / 100.0)
+                if (
+                    trail_sl < self._stop_loss
+                    and trail_sl < self._entry_price  # Must lock in profit
+                    and (trail_sl - price) >= min_sl_distance  # Min distance
+                ):
                     old_sl = self._stop_loss
                     self._stop_loss = round(trail_sl, 2)
+                    decision_log.log("strategy", "info", "Trailing SL updated (SHORT)", {
+                        "symbol": self.get_param("trading_symbol"),
+                        "old_sl": old_sl, "new_sl": self._stop_loss,
+                        "trough": self._trailing_peak, "price": price,
+                    })
                     logger.debug(
                         "Trailing SL updated SHORT %s: %.2f → %.2f (trough=%.2f)",
                         self.get_param("trading_symbol"), old_sl, self._stop_loss,
@@ -438,30 +495,73 @@ class CPRBreakoutStrategy(Strategy):
             return  # Not a narrow CPR day
 
         rr = self.get_param("risk_reward_ratio", 2.0)
+        min_sl_pct = self.get_param("min_sl_distance_pct", 0.1)
+
+        decision_log.log("strategy", "debug", "Checking breakout entry", {
+            "symbol": self.get_param("trading_symbol"),
+            "candle_close": candle.close,
+            "tc": self._cpr.tc,
+            "bc": self._cpr.bc,
+            "width_pct": self._cpr.width_pct,
+            "above_tc": candle.close > self._cpr.tc,
+            "below_bc": candle.close < self._cpr.bc,
+        })
 
         # LONG breakout: candle closes above TC
         if candle.close > self._cpr.tc:
             sl_distance = candle.close - self._cpr.bc
+            # Fix #6: Enforce minimum SL distance
+            min_sl_distance = candle.close * (min_sl_pct / 100.0)
+            if sl_distance < min_sl_distance:
+                sl_distance = min_sl_distance
+                decision_log.log("strategy", "warn", "SL distance too small, using floor", {
+                    "symbol": self.get_param("trading_symbol"),
+                    "original_sl_dist": candle.close - self._cpr.bc,
+                    "floor_sl_dist": min_sl_distance,
+                })
+
             self._position = "LONG"
             self._entry_price = candle.close
-            self._stop_loss = self._cpr.bc
+            self._stop_loss = round(candle.close - sl_distance, 2)
             self._target = candle.close + rr * sl_distance
             self._traded_today = True
+            self._order_confirmed = False  # Fix #5: Reset until order confirmed
             self._trailing_peak = candle.close  # Initialize peak at entry
 
+            decision_log.log("strategy", "info", "LONG breakout signal", {
+                "symbol": self.get_param("trading_symbol"),
+                "entry": self._entry_price, "sl": self._stop_loss,
+                "target": self._target, "cpr_width": self._cpr.width_pct,
+            })
             self._emit_buy_signal(candle, f"CPR breakout LONG — close {candle.close:.2f} > TC {self._cpr.tc:.2f} (width {self._cpr.width_pct:.4f}%)")
             return
 
         # SHORT breakout: candle closes below BC
         if candle.close < self._cpr.bc:
             sl_distance = self._cpr.tc - candle.close
+            # Fix #6: Enforce minimum SL distance
+            min_sl_distance = candle.close * (min_sl_pct / 100.0)
+            if sl_distance < min_sl_distance:
+                sl_distance = min_sl_distance
+                decision_log.log("strategy", "warn", "SL distance too small, using floor", {
+                    "symbol": self.get_param("trading_symbol"),
+                    "original_sl_dist": self._cpr.tc - candle.close,
+                    "floor_sl_dist": min_sl_distance,
+                })
+
             self._position = "SHORT"
             self._entry_price = candle.close
-            self._stop_loss = self._cpr.tc
+            self._stop_loss = round(candle.close + sl_distance, 2)
             self._target = candle.close - rr * sl_distance
             self._traded_today = True
+            self._order_confirmed = False  # Fix #5: Reset until order confirmed
             self._trailing_peak = candle.close  # Initialize trough at entry
 
+            decision_log.log("strategy", "info", "SHORT breakout signal", {
+                "symbol": self.get_param("trading_symbol"),
+                "entry": self._entry_price, "sl": self._stop_loss,
+                "target": self._target, "cpr_width": self._cpr.width_pct,
+            })
             self._emit_sell_signal(candle, f"CPR breakout SHORT — close {candle.close:.2f} < BC {self._cpr.bc:.2f} (width {self._cpr.width_pct:.4f}%)")
             return
 
@@ -543,6 +643,7 @@ class CPRBreakoutStrategy(Strategy):
         self._stop_loss = 0.0
         self._target = 0.0
         self._trailing_peak = 0.0
+        self._order_confirmed = False
 
     def _close_position_at_price(self, price: float, ts: datetime, reason: str) -> None:
         """Emit a closing signal from a tick (no candle available) and reset position."""
@@ -593,6 +694,7 @@ class CPRBreakoutStrategy(Strategy):
         self._stop_loss = 0.0
         self._target = 0.0
         self._trailing_peak = 0.0
+        self._order_confirmed = False
 
     # ── Public accessors for scanner ────────────────────────────────────
 

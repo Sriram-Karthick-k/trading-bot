@@ -179,6 +179,14 @@ export const config = {
     request<{ status: string; paper_status: import("@/types").PaperStatus }>("/config/trading-mode/reset", {
       method: "POST",
     }),
+  // Paper trading settings
+  getPaperSettings: () =>
+    request<import("@/types").PaperSettings>("/config/paper-settings"),
+  updatePaperSettings: (settings: Partial<import("@/types").PaperSettings>) =>
+    request<{ status: string; settings: Partial<import("@/types").PaperSettings> }>("/config/paper-settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
 };
 
 // ── Mock ────────────────────────────────────────────────
@@ -267,6 +275,17 @@ export const engine = {
       method: "POST",
       body: JSON.stringify(candle),
     }),
+  getLogs: (params?: { limit?: number; component?: string; level?: string }) => {
+    const searchParams = new URLSearchParams();
+    if (params?.limit) searchParams.set("limit", String(params.limit));
+    if (params?.component) searchParams.set("component", params.component);
+    if (params?.level) searchParams.set("level", params.level);
+    const qs = searchParams.toString();
+    return request<import("@/types").DecisionLogResponse>(
+      `/engine/logs${qs ? `?${qs}` : ""}`,
+    );
+  },
+  clearLogs: () => request<{ cleared: number }>("/engine/logs", { method: "DELETE" }),
 };
 
 // ── Health ──────────────────────────────────────────────

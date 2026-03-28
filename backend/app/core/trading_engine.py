@@ -32,6 +32,7 @@ from app.providers.base import BrokerProvider
 from app.providers.types import (
     Candle,
     CandleInterval,
+    OrderStatus,
     TickData,
     TickMode,
 )
@@ -220,6 +221,7 @@ class TradingEngine:
         self._ticker = None  # TickerConnection
         self._eod_task: asyncio.Task | None = None
         self._signal_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
 
         # Journal: maps strategy_id → active trade_id for entry/exit tracking
         self._active_trades: dict[str, str] = {}
@@ -329,6 +331,9 @@ class TradingEngine:
         # Start signal processing loop
         self._signal_task = asyncio.create_task(self._signal_processing_loop())
 
+        # Start periodic status heartbeat (5s) so UI stays fresh
+        self._heartbeat_task = asyncio.create_task(self._status_heartbeat_loop())
+
         self._log_event("info", "Trading engine started", {
             "strategies": len(self._strategies),
             "tokens": list(self._strategies.keys()),
@@ -356,6 +361,13 @@ class TradingEngine:
             self._signal_task.cancel()
             try:
                 await self._signal_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
 
@@ -600,6 +612,36 @@ class TradingEngine:
                     if mo.order_id and self._journal:
                         self._journal_record_order(mo, strategy)
 
+                    # Notify strategy of order update (needed for _order_confirmed flag)
+                    # For paper orders: they fill immediately during place_order()
+                    # For live orders: we'll get the update via ticker callback later
+                    if mo.order_id and getattr(self._provider, "is_paper", False):
+                        try:
+                            from app.providers.types import Order as ProviderOrder, Validity
+                            order_obj = ProviderOrder(
+                                order_id=mo.order_id,
+                                tradingsymbol=mo.signal.trading_symbol,
+                                exchange=mo.request.exchange,
+                                transaction_type=mo.request.transaction_type,
+                                order_type=mo.request.order_type,
+                                product=mo.request.product,
+                                variety=mo.request.variety,
+                                status=OrderStatus.COMPLETE,
+                                quantity=mo.request.quantity,
+                                price=mo.request.price,
+                                trigger_price=mo.request.trigger_price,
+                                filled_quantity=mo.request.quantity,
+                                average_price=mo.signal.metadata.get("entry_price", 0.0),
+                                pending_quantity=0,
+                                cancelled_quantity=0,
+                                disclosed_quantity=0,
+                                validity=Validity.DAY,
+                                order_timestamp=mo.placed_at,
+                            )
+                            await strategy.on_order_update(order_obj)
+                        except Exception as e:
+                            logger.error("Strategy on_order_update failed: %s", e)
+
             except Exception as e:
                 logger.error("Order processing error for %s: %s", strategy.strategy_id, e)
                 self._log_event("error", f"Order error: {e}", {
@@ -631,6 +673,17 @@ class TradingEngine:
     def _on_order_update(self, data: dict) -> None:
         """Handle real-time order updates from KiteTicker."""
         self._log_event("order", f"Order update: {data.get('status', 'unknown')}", data)
+
+    # ── Status Heartbeat ───────────────────────────────────────────────
+
+    async def _status_heartbeat_loop(self) -> None:
+        """Broadcast engine status every 5 seconds so UI stays fresh."""
+        try:
+            while self.state in (EngineState.RUNNING, EngineState.PAUSED):
+                self._broadcast_status()
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            pass
 
     # ── EOD Auto-Close ───────────────────────────────────────────────────
 
